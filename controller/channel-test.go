@@ -901,6 +901,15 @@ func testAllChannels(notify bool) error {
 				continue
 			}
 			isChannelEnabled := channel.Status == common.ChannelStatusEnabled
+			if !isChannelEnabled && channel.Status == common.ChannelStatusAutoDisabled && service.Has429Cooldown(channel.Id) {
+				if !service.Is429CooldownExpired(channel.Id) {
+					continue
+				}
+				common.SysLog(fmt.Sprintf("通道 #%d 429 cooldown 已到期，不探活直接恢复", channel.Id))
+				service.EnableChannel429Cooldown(channel.Id, channel.Name)
+				time.Sleep(common.RequestInterval)
+				continue
+			}
 			tik := time.Now()
 			result := testChannel(channel, "", "", shouldUseStreamForAutomaticChannelTest(channel))
 			tok := time.Now()

@@ -45,11 +45,17 @@ func Record429Ban(channelId int) time.Time {
 	return expireAt
 }
 
+// Has429Cooldown 检查 channel 是否有已记录的 429 cooldown。
+func Has429Cooldown(channelId int) bool {
+	_, ok := channel429Cooldown.Load(channelId)
+	return ok
+}
+
 // Is429CooldownExpired 检查 channel 的 429 cooldown 是否已到期。
 func Is429CooldownExpired(channelId int) bool {
 	expireRaw, ok := channel429Cooldown.Load(channelId)
 	if !ok {
-		return true // 无记录 = 可以恢复
+		return false // 无记录不等于 429 cooldown 到期，避免失败 probe 误恢复
 	}
 	expire, _ := expireRaw.(time.Time)
 	return time.Now().After(expire)
@@ -160,11 +166,9 @@ func ShouldEnableChannelWithCooldown(channelId int, newAPIError *types.NewAPIErr
 	if newAPIError == nil {
 		return true
 	}
-	// 路径B：429 cooldown 到期 → 恢复
-	if Is429ChannelError(newAPIError) && Is429CooldownExpired(channelId) {
-		common.SysLog(fmt.Sprintf("通道 #%d 429 cooldown 已到期，尝试恢复", channelId))
-		return true
-	}
+	// 429 cooldown 恢复不依赖 probe 成功，也不能在 probe 返回 429 时误恢复。
+	// 自动测试循环会在发起 probe 前检查 cooldown 是否到期并直接恢复。
+	// 这里拿到 429 说明本次 probe 已失败，必须保持禁用状态。
 	return false
 }
 
