@@ -3,6 +3,8 @@ package service
 import (
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -10,6 +12,59 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 )
+
+// ─── 429 cooldown 管理 ──────────────────────────────────────
+// wine 设计的三层恢复架构第二层：
+//   429 不依赖 probe 成功来恢复，而是按时间窗口自动恢复。
+//   恢复后真实请求又 429 → backoff 递增 cooldown。
+
+var (
+	channel429Cooldown sync.Map // channelId (int) → cooldown 到期时间 (time.Time)
+	channel429Backoff  sync.Map // channelId (int) → backoff 级别 (int: 0/1/2/3)
+)
+
+// 429 cooldown backoff 阶梯（秒）
+var cooldown429Steps = []time.Duration{90 * time.Second, 150 * time.Second, 240 * time.Second}
+
+// Record429Ban 记录一次 429 ban，返回 cooldown 到期时间。
+// backoffLevel 0 = 第一次 429（90s），之后递增，最大 2（240s）。
+func Record429Ban(channelId int) time.Time {
+	levelRaw, _ := channel429Backoff.Load(channelId)
+	level, _ := levelRaw.(int)
+	if level >= len(cooldown429Steps) {
+		level = len(cooldown429Steps) - 1
+	}
+	cooldown := cooldown429Steps[level]
+	expireAt := time.Now().Add(cooldown)
+
+	channel429Cooldown.Store(channelId, expireAt)
+	if level+1 < len(cooldown429Steps) {
+		channel429Backoff.Store(channelId, level+1)
+	}
+	common.SysLog(fmt.Sprintf("通道 #%d 429 cooldown: level=%d, expire=%s", channelId, level, expireAt.Format(time.RFC3339)))
+	return expireAt
+}
+
+// Is429CooldownExpired 检查 channel 的 429 cooldown 是否已到期。
+func Is429CooldownExpired(channelId int) bool {
+	expireRaw, ok := channel429Cooldown.Load(channelId)
+	if !ok {
+		return true // 无记录 = 可以恢复
+	}
+	expire, _ := expireRaw.(time.Time)
+	return time.Now().After(expire)
+}
+
+// Reset429Backoff 恢复成功后重置 backoff 级别。
+func Reset429Backoff(channelId int) {
+	channel429Cooldown.Delete(channelId)
+	channel429Backoff.Delete(channelId)
+}
+
+// Cooldown429Duration 返回当前 429 cooldown 时长（用于日志）。
+func Cooldown429Duration() time.Duration {
+	return cooldown429Steps[0]
+}
 
 func formatNotifyType(channelId int, status int) string {
 	return fmt.Sprintf("%s_%d_%d", dto.NotifyTypeChannelUpdate, channelId, status)
@@ -36,10 +91,19 @@ func DisableChannel(channelError types.ChannelError, reason string) {
 func EnableChannel(channelId int, usingKey string, channelName string) {
 	success := model.UpdateChannelStatus(channelId, usingKey, common.ChannelStatusEnabled, "")
 	if success {
+		Reset429Backoff(channelId)
 		subject := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
 		content := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
 		NotifyRootUser(formatNotifyType(channelId, common.ChannelStatusEnabled), subject, content)
 	}
+}
+
+// Is429ChannelError 判断错误是否为 429 rate-limit。
+func Is429ChannelError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	return err.StatusCode == 429
 }
 
 func ShouldDisableChannel(err *types.NewAPIError) bool {
@@ -47,6 +111,10 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 		return false
 	}
 	if err == nil {
+		return false
+	}
+	// 429 不走永久 ban，走 cooldown 时间窗恢复
+	if Is429ChannelError(err) {
 		return false
 	}
 	if types.IsChannelError(err) {
@@ -68,11 +136,46 @@ func ShouldEnableChannel(newAPIError *types.NewAPIError, status int) bool {
 	if !common.AutomaticEnableChannelEnabled {
 		return false
 	}
-	if newAPIError != nil {
+	if status != common.ChannelStatusAutoDisabled {
+		return false
+	}
+	// 路径A：probe 成功（原有逻辑）
+	if newAPIError == nil {
+		return true
+	}
+	// 路径B：429 错误不做永久禁用，允许恢复
+	return false
+}
+
+// ShouldEnableChannelWithCooldown 支持 429 cooldown 时间窗恢复。
+// channelId 用于检查 cooldown 是否到期。
+func ShouldEnableChannelWithCooldown(channelId int, newAPIError *types.NewAPIError, status int) bool {
+	if !common.AutomaticEnableChannelEnabled {
 		return false
 	}
 	if status != common.ChannelStatusAutoDisabled {
 		return false
 	}
-	return true
+	// 路径A：probe 成功（原有逻辑）
+	if newAPIError == nil {
+		return true
+	}
+	// 路径B：429 cooldown 到期 → 恢复
+	if Is429ChannelError(newAPIError) && Is429CooldownExpired(channelId) {
+		common.SysLog(fmt.Sprintf("通道 #%d 429 cooldown 已到期，尝试恢复", channelId))
+		return true
+	}
+	return false
+}
+
+// EnableChannel429Cooldown 启用 429 cooldown 恢复的 channel。
+func EnableChannel429Cooldown(channelId int, channelName string) {
+	success := model.UpdateChannelStatus(channelId, "", common.ChannelStatusEnabled, "")
+	if success {
+		Reset429Backoff(channelId)
+		common.SysLog(fmt.Sprintf("通道「%s」（#%d）429 cooldown 到期，已自动恢复", channelName, channelId))
+		subject := fmt.Sprintf("通道「%s」（#%d）429 冷却到期已恢复", channelName, channelId)
+		content := fmt.Sprintf("通道「%s」（#%d）429 cooldown 到期，已自动恢复为启用状态", channelName, channelId)
+		NotifyRootUser(formatNotifyType(channelId, common.ChannelStatusEnabled), subject, content)
+	}
 }

@@ -907,14 +907,16 @@ func testAllChannels(notify bool) error {
 			milliseconds := tok.Sub(tik).Milliseconds()
 
 			shouldBanChannel := false
+			is429Error := false
 			newAPIError := result.newAPIError
 			// request error disables the channel
 			if newAPIError != nil {
 				shouldBanChannel = service.ShouldDisableChannel(result.newAPIError)
+				is429Error = service.Is429ChannelError(result.newAPIError)
 			}
 
 			// 当错误检查通过，才检查响应时间
-			if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
+			if common.AutomaticDisableChannelEnabled && !shouldBanChannel && !is429Error {
 				if milliseconds > disableThreshold {
 					err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
 					newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
@@ -927,9 +929,25 @@ func testAllChannels(notify bool) error {
 				processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 			}
 
-			// enable channel
-			if !isChannelEnabled && service.ShouldEnableChannel(newAPIError, channel.Status) {
-				service.EnableChannel(channel.Id, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.Name)
+			// 429 cooldown: ban channel 但不走常规路径，记录 cooldown 时间戳
+			if isChannelEnabled && is429Error && channel.GetAutoBan() {
+				service.Record429Ban(channel.Id)
+				service.DisableChannel(
+					*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
+						common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()),
+					fmt.Sprintf("429 rate-limit (cooldown %v)", service.Cooldown429Duration()),
+				)
+			}
+
+			// enable channel (support 429 cooldown recovery)
+			if !isChannelEnabled {
+				if service.ShouldEnableChannelWithCooldown(channel.Id, newAPIError, channel.Status) {
+					if is429Error {
+						service.EnableChannel429Cooldown(channel.Id, channel.Name)
+					} else {
+						service.EnableChannel(channel.Id, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.Name)
+					}
+				}
 			}
 
 			channel.UpdateResponseTime(milliseconds)
