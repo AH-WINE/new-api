@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -42,6 +43,29 @@ func GetGroupEnabledModels(group string) []string {
 	var models []string
 	// Find distinct models
 	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
+	return models
+}
+
+func GetGroupRouteableModels(group string) []string {
+	var channels []Channel
+	DB.Where(commonGroupCol+" = ? AND status = ?", group, common.ChannelStatusEnabled).Find(&channels)
+
+	modelSet := make(map[string]struct{})
+	for _, channel := range channels {
+		for _, modelName := range channel.GetModels() {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				continue
+			}
+			modelSet[modelName] = struct{}{}
+		}
+	}
+
+	models := make([]string, 0, len(modelSet))
+	for modelName := range modelSet {
+		models = append(models, modelName)
+	}
+	sort.Strings(models)
 	return models
 }
 

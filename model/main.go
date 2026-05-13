@@ -187,12 +187,21 @@ func InitDB() (err error) {
 				panic(err)
 			}
 		}
-		sqlDB, err := DB.DB()
+sqlDB, err := DB.DB()
 		if err != nil {
 			return err
 		}
+		// SQLite 性能优化：WAL 模式 + busy_timeout 减少高并发下 SQLITE_BUSY
+		if common.UsingSQLite {
+			DB.Exec("PRAGMA journal_mode=WAL")
+			DB.Exec("PRAGMA busy_timeout=5000")
+		}
 		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
-		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
+		if common.UsingSQLite {
+			sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 10))
+		} else {
+			sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
+		}
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
 		if !common.IsMasterNode {
