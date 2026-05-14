@@ -318,6 +318,7 @@ const ChannelsActions = ({
               <Select.Option value='all'>{t('全部')}</Select.Option>
               <Select.Option value='enabled'>{t('已启用')}</Select.Option>
               <Select.Option value='disabled'>{t('已禁用')}</Select.Option>
+              <Select.Option value='quarantined'>{t('已隔离')}</Select.Option>
             </Select>
           </div>
         </div>
