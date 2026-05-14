@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -109,12 +110,14 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 			MaxIdleConns:        common.RelayMaxIdleConns,
 			MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
 			// CT112 NV relay goes through an HTTP CONNECT proxy (PVE Mihomo).
-			// Long NVIDIA v4-pro streaming responses over HTTP/2 intermittently
-			// fail with TLS bad record MAC / EOF through this path, while the
-			// same proxy path forced to HTTP/1.1 is stable in production-shape
-			// probes. Keep the default direct client on HTTP/2, but prefer
-			// HTTP/1.1 for explicit proxy clients.
+			// Long NVIDIA v4-pro streaming responses intermittently fail with
+			// TLS bad record MAC / EOF on the proxy path when Go is allowed to
+			// negotiate HTTP/2. ForceAttemptHTTP2=false is not a hard kill switch
+			// on every Go transport path, so an empty TLSNextProto map is set as
+			// the documented hard disable for HTTP/2. Keep the default direct
+			// client on HTTP/2; only explicit proxy clients are forced to H1.
 			ForceAttemptHTTP2: false,
+			TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
 			Proxy:             http.ProxyURL(parsedURL),
 		}
 		if common.TLSInsecureSkipVerify {
