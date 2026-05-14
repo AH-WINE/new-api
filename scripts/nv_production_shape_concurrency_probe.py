@@ -433,7 +433,28 @@ def main() -> int:
     parser.add_argument("--output", help="result JSON path; default under ~/.hermes/tmp")
     parser.add_argument("--stop-on-fail-rate", type=float, default=0.01)
     parser.add_argument("--safe-p99-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--max-safe-concurrency",
+        type=int,
+        default=100,
+        help="hard guard for the 35-key NV pool; higher values can trigger upstream 429 cooldown",
+    )
+    parser.add_argument(
+        "--allow-pool-risk",
+        action="store_true",
+        help="allow concurrency above --max-safe-concurrency; use only with an explicit rollback plan",
+    )
     args = parser.parse_args()
+
+    max_requested = max(args.concurrency or [0])
+    if max_requested > args.max_safe_concurrency and not args.allow_pool_risk:
+        raise SystemExit(
+            f"refuse unsafe NV pool concurrency {max_requested}: "
+            f"max_safe_concurrency={args.max_safe_concurrency}. "
+            "Current CT112 NV pool has 35 healthy channels; tests above ~100 "
+            "have triggered upstream 429 cooldown and disabled channels. "
+            "Pass --allow-pool-risk only after protecting/restoring the pool."
+        )
 
     if args.generate_template:
         template_path = generate_template_via_hermes(args)
