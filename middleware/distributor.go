@@ -36,6 +36,19 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		var releaseModelConcurrency func()
+		if shouldSelectChannel && modelRequest.Model != "" {
+			release, rejected, current, limit := acquireModelConcurrency(modelRequest.Model)
+			if rejected {
+				abortWithOpenAiMessage(c, http.StatusTooManyRequests, fmt.Sprintf("model %s concurrency limit reached: %d/%d active requests", modelRequest.Model, current, limit))
+				return
+			}
+			releaseModelConcurrency = release
+			if releaseModelConcurrency != nil {
+				defer releaseModelConcurrency()
+			}
+		}
+
 		if ok {
 			id, err := strconv.Atoi(channelId.(string))
 			if err != nil {
