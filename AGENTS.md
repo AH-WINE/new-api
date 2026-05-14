@@ -1,5 +1,37 @@
 # AGENTS.md — Project Conventions for new-api
 
+## Yue Fork / Official Upstream Boundary（最高优先级）
+
+This working tree is Yue/wine's custom fork workspace, not the official NewAPI contribution workspace.
+
+**Never submit, push, or open pull requests from this workspace to the official NewAPI upstream repository.**
+
+Repository roles:
+
+- `origin` (`AH-WINE/new-api`) is wine's fork. Custom NV/NewAPI production hardening work may be committed and pushed here.
+- `upstream` (`Calcium-Ion/new-api`) is the official NewAPI repository. It is read-only for this workspace.
+
+Allowed operations against official upstream:
+
+- `git fetch upstream`
+- inspect upstream commits/tags/releases
+- merge/rebase/cherry-pick official changes into wine's fork after review
+- compare our fork with upstream to follow latest official features
+
+Forbidden operations against official upstream:
+
+- `git push upstream ...`
+- creating PRs from this custom NV branch/workspace to the official project
+- submitting CT112/NV-specific production policy, channel-pool assumptions, private deployment scripts, or local operational defaults to official NewAPI
+- rewriting this fork's custom changes to look like official upstream contribution work
+
+Default workflow:
+
+1. Track official NewAPI only to keep up with upstream features and bug fixes.
+2. Land Yue/wine custom changes in `origin` branches only.
+3. Before any push, verify the push target is `origin`, not `upstream`.
+4. If a change seems generally useful upstream, stop and ask wine before preparing a separate clean upstream contribution branch outside this CT112/NV production branch.
+
 ## Overview
 
 This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI providers (OpenAI, Claude, Gemini, Azure, AWS Bedrock, etc.) behind a unified API, with user management, billing, rate limiting, and an admin dashboard.
