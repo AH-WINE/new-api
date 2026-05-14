@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -66,4 +67,67 @@ func TestHardDisableChannelPersistsQuarantinedStatus(t *testing.T) {
 	var ability model.Ability
 	require.NoError(t, model.DB.First(&ability, "channel_id = ?", 77).Error)
 	require.False(t, ability.Enabled)
+}
+
+func reset429CooldownStateForTest() {
+	channel429Cooldown.Range(func(key, _ any) bool {
+		channel429Cooldown.Delete(key)
+		return true
+	})
+	channel429Backoff.Range(func(key, _ any) bool {
+		channel429Backoff.Delete(key)
+		return true
+	})
+}
+
+func Test429CooldownStateRestoresFromPersistedReasonAfterRestart(t *testing.T) {
+	reset429CooldownStateForTest()
+	defer reset429CooldownStateForTest()
+
+	_, reason := Record429BanWithReason(88)
+	reset429CooldownStateForTest() // simulate process restart: in-memory cooldown maps are empty
+
+	channel := model.Channel{Id: 88, Status: common.ChannelStatusAutoDisabled}
+	channel.SetOtherInfo(map[string]interface{}{
+		"status_reason": reason,
+		"status_time":   time.Now().Unix(),
+	})
+
+	known, expired := Get429CooldownState(&channel)
+
+	require.True(t, known)
+	require.False(t, expired)
+	require.True(t, Has429Cooldown(88))
+}
+
+func Test429CooldownStateTreatsExpiredLegacyReasonAsExpired(t *testing.T) {
+	reset429CooldownStateForTest()
+	defer reset429CooldownStateForTest()
+
+	channel := model.Channel{Id: 89, Status: common.ChannelStatusAutoDisabled}
+	channel.SetOtherInfo(map[string]interface{}{
+		"status_reason": "429 rate-limit (cooldown 1m30s)",
+		"status_time":   time.Now().Add(-3 * time.Minute).Unix(),
+	})
+
+	known, expired := Get429CooldownState(&channel)
+
+	require.True(t, known)
+	require.True(t, expired)
+}
+
+func Test429CooldownStateIgnoresNon429AutoDisabledReason(t *testing.T) {
+	reset429CooldownStateForTest()
+	defer reset429CooldownStateForTest()
+
+	channel := model.Channel{Id: 90, Status: common.ChannelStatusAutoDisabled}
+	channel.SetOtherInfo(map[string]interface{}{
+		"status_reason": "Authorization failed",
+		"status_time":   time.Now().Unix(),
+	})
+
+	known, expired := Get429CooldownState(&channel)
+
+	require.False(t, known)
+	require.False(t, expired)
 }

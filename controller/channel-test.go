@@ -913,14 +913,17 @@ func testAllChannels(notify bool) error {
 				continue
 			}
 			isChannelEnabled := channel.Status == common.ChannelStatusEnabled
-			if !isChannelEnabled && channel.Status == common.ChannelStatusAutoDisabled && service.Has429Cooldown(channel.Id) {
-				if !service.Is429CooldownExpired(channel.Id) {
+			if !isChannelEnabled && channel.Status == common.ChannelStatusAutoDisabled {
+				known429Cooldown, expired429Cooldown := service.Get429CooldownState(channel)
+				if known429Cooldown {
+					if !expired429Cooldown {
+						continue
+					}
+					common.SysLog(fmt.Sprintf("通道 #%d 429 cooldown 已到期，不探活直接恢复", channel.Id))
+					service.EnableChannel429Cooldown(channel.Id, channel.Name)
+					time.Sleep(common.RequestInterval)
 					continue
 				}
-				common.SysLog(fmt.Sprintf("通道 #%d 429 cooldown 已到期，不探活直接恢复", channel.Id))
-				service.EnableChannel429Cooldown(channel.Id, channel.Name)
-				time.Sleep(common.RequestInterval)
-				continue
 			}
 			tik := time.Now()
 			result := testChannel(channel, "", "", shouldUseStreamForAutomaticChannelTest(channel))
@@ -952,11 +955,11 @@ func testAllChannels(notify bool) error {
 
 			// 429 cooldown: ban channel 但不走常规路径，记录 cooldown 时间戳
 			if isChannelEnabled && is429Error && channel.GetAutoBan() {
-				service.Record429Ban(channel.Id)
+				_, reason := service.Record429BanWithReason(channel.Id)
 				service.DisableChannel(
 					*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
 						common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()),
-					fmt.Sprintf("429 rate-limit (cooldown %v)", service.Cooldown429Duration()),
+					reason,
 				)
 			}
 

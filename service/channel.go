@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,23 +27,181 @@ var (
 // 429 cooldown backoff 阶梯（秒）
 var cooldown429Steps = []time.Duration{90 * time.Second, 150 * time.Second, 240 * time.Second}
 
+const channel429ReasonPrefix = "429 rate-limit"
+
+type cooldown429Record struct {
+	level    int
+	duration time.Duration
+	expireAt time.Time
+}
+
+func clamp429Level(level int) int {
+	if level < 0 {
+		return 0
+	}
+	if level >= len(cooldown429Steps) {
+		return len(cooldown429Steps) - 1
+	}
+	return level
+}
+
+func next429BackoffLevel(level int) int {
+	return clamp429Level(level + 1)
+}
+
+func store429Cooldown(channelId int, level int, expireAt time.Time) {
+	level = clamp429Level(level)
+	channel429Cooldown.Store(channelId, expireAt)
+	channel429Backoff.Store(channelId, next429BackoffLevel(level))
+}
+
+func record429Ban(channelId int) cooldown429Record {
+	levelRaw, _ := channel429Backoff.Load(channelId)
+	level, _ := levelRaw.(int)
+	level = clamp429Level(level)
+	duration := cooldown429Steps[level]
+	expireAt := time.Now().Add(duration)
+
+	store429Cooldown(channelId, level, expireAt)
+	common.SysLog(fmt.Sprintf("通道 #%d 429 cooldown: level=%d, expire=%s", channelId, level, expireAt.Format(time.RFC3339)))
+	return cooldown429Record{level: level, duration: duration, expireAt: expireAt}
+}
+
+func format429CooldownReason(record cooldown429Record) string {
+	return fmt.Sprintf("%s (cooldown=%s, expire=%s, level=%d)", channel429ReasonPrefix, record.duration.String(), record.expireAt.UTC().Format(time.RFC3339), record.level)
+}
+
 // Record429Ban 记录一次 429 ban，返回 cooldown 到期时间。
 // backoffLevel 0 = 第一次 429（90s），之后递增，最大 2（240s）。
 func Record429Ban(channelId int) time.Time {
-	levelRaw, _ := channel429Backoff.Load(channelId)
-	level, _ := levelRaw.(int)
-	if level >= len(cooldown429Steps) {
-		level = len(cooldown429Steps) - 1
-	}
-	cooldown := cooldown429Steps[level]
-	expireAt := time.Now().Add(cooldown)
+	return record429Ban(channelId).expireAt
+}
 
-	channel429Cooldown.Store(channelId, expireAt)
-	if level+1 < len(cooldown429Steps) {
-		channel429Backoff.Store(channelId, level+1)
+// Record429BanWithReason 记录 429 ban，并返回可持久化到 channel.status_reason 的原因。
+func Record429BanWithReason(channelId int) (time.Time, string) {
+	record := record429Ban(channelId)
+	return record.expireAt, format429CooldownReason(record)
+}
+
+func is429CooldownReason(reason string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(reason)), channel429ReasonPrefix)
+}
+
+func parse429ReasonField(reason string, key string) string {
+	marker := key + "="
+	idx := strings.Index(reason, marker)
+	if idx < 0 {
+		return ""
 	}
-	common.SysLog(fmt.Sprintf("通道 #%d 429 cooldown: level=%d, expire=%s", channelId, level, expireAt.Format(time.RFC3339)))
-	return expireAt
+	value := reason[idx+len(marker):]
+	end := len(value)
+	for _, sep := range []string{",", ")", " "} {
+		if sepIdx := strings.Index(value, sep); sepIdx >= 0 && sepIdx < end {
+			end = sepIdx
+		}
+	}
+	return strings.TrimSpace(value[:end])
+}
+
+func parse429LegacyCooldownDuration(reason string) time.Duration {
+	marker := "cooldown "
+	idx := strings.Index(reason, marker)
+	if idx < 0 {
+		return 0
+	}
+	value := reason[idx+len(marker):]
+	end := len(value)
+	for _, sep := range []string{",", ")", " "} {
+		if sepIdx := strings.Index(value, sep); sepIdx >= 0 && sepIdx < end {
+			end = sepIdx
+		}
+	}
+	duration, err := time.ParseDuration(strings.TrimSpace(value[:end]))
+	if err != nil {
+		return 0
+	}
+	return duration
+}
+
+func parse429StatusTime(value interface{}) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case float32:
+		return int64(typed)
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func infer429LevelFromDuration(duration time.Duration) int {
+	for idx, step := range cooldown429Steps {
+		if duration == step {
+			return idx
+		}
+	}
+	return 0
+}
+
+func parse429CooldownFromInfo(reason string, statusTime int64) (time.Time, int, bool) {
+	if expireRaw := parse429ReasonField(reason, "expire"); expireRaw != "" {
+		if expireAt, err := time.Parse(time.RFC3339, expireRaw); err == nil {
+			level := 0
+			if levelRaw := parse429ReasonField(reason, "level"); levelRaw != "" {
+				if parsed, err := strconv.Atoi(levelRaw); err == nil {
+					level = clamp429Level(parsed)
+				}
+			}
+			return expireAt, level, true
+		}
+	}
+
+	duration := time.Duration(0)
+	if durationRaw := parse429ReasonField(reason, "cooldown"); durationRaw != "" {
+		duration, _ = time.ParseDuration(durationRaw)
+	}
+	if duration == 0 {
+		duration = parse429LegacyCooldownDuration(reason)
+	}
+	if duration == 0 || statusTime <= 0 {
+		return time.Time{}, 0, false
+	}
+	return time.Unix(statusTime, 0).Add(duration), infer429LevelFromDuration(duration), true
+}
+
+// Get429CooldownState checks whether an auto-disabled channel is in a persisted 429 cooldown.
+// It restores in-memory cooldown state from channel.other_info so recovery survives process restarts.
+func Get429CooldownState(channel *model.Channel) (known bool, expired bool) {
+	if channel == nil || channel.Status != common.ChannelStatusAutoDisabled {
+		return false, false
+	}
+	if expireRaw, ok := channel429Cooldown.Load(channel.Id); ok {
+		if expireAt, ok := expireRaw.(time.Time); ok {
+			return true, !time.Now().Before(expireAt)
+		}
+	}
+
+	info := channel.GetOtherInfo()
+	reason, _ := info["status_reason"].(string)
+	if !is429CooldownReason(reason) {
+		return false, false
+	}
+	statusTime := parse429StatusTime(info["status_time"])
+	expireAt, level, ok := parse429CooldownFromInfo(reason, statusTime)
+	if !ok {
+		return true, true
+	}
+	store429Cooldown(channel.Id, level, expireAt)
+	return true, !time.Now().Before(expireAt)
 }
 
 // Has429Cooldown 检查 channel 是否有已记录的 429 cooldown。

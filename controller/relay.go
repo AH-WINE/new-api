@@ -366,8 +366,8 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	} else if channelError.AutoBan && service.Is429ChannelError(err) {
 		model.CacheUpdateChannelStatus(channelError.ChannelId, common.ChannelStatusAutoDisabled)
 		gopool.Go(func() {
-			service.Record429Ban(channelError.ChannelId)
-			service.DisableChannel(channelError, fmt.Sprintf("429 rate-limit (cooldown %v)", service.Cooldown429Duration()))
+			_, reason := service.Record429BanWithReason(channelError.ChannelId)
+			service.DisableChannel(channelError, reason)
 		})
 	} else if service.ShouldDisableChannel(err) && channelError.AutoBan {
 		model.CacheUpdateChannelStatus(channelError.ChannelId, common.ChannelStatusAutoDisabled)
