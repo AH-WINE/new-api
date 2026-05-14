@@ -108,8 +108,14 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 		transport := &http.Transport{
 			MaxIdleConns:        common.RelayMaxIdleConns,
 			MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
-			ForceAttemptHTTP2:   true,
-			Proxy:               http.ProxyURL(parsedURL),
+			// CT112 NV relay goes through an HTTP CONNECT proxy (PVE Mihomo).
+			// Long NVIDIA v4-pro streaming responses over HTTP/2 intermittently
+			// fail with TLS bad record MAC / EOF through this path, while the
+			// same proxy path forced to HTTP/1.1 is stable in production-shape
+			// probes. Keep the default direct client on HTTP/2, but prefer
+			// HTTP/1.1 for explicit proxy clients.
+			ForceAttemptHTTP2: false,
+			Proxy:             http.ProxyURL(parsedURL),
 		}
 		if common.TLSInsecureSkipVerify {
 			transport.TLSClientConfig = common.InsecureTLSConfig
