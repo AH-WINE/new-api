@@ -94,6 +94,23 @@ func DisableChannel(channelError types.ChannelError, reason string) {
 	}
 }
 
+func HardDisableChannel(channelError types.ChannelError, reason string) {
+	common.SysLog(fmt.Sprintf("通道「%s」（#%d）发生硬错误，准备永久隔离，原因：%s", channelError.ChannelName, channelError.ChannelId, reason))
+
+	if !channelError.AutoBan {
+		common.SysLog(fmt.Sprintf("通道「%s」（#%d）未启用自动禁用功能，跳过永久隔离", channelError.ChannelName, channelError.ChannelId))
+		return
+	}
+
+	success := model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusManuallyDisabled, reason)
+	if success {
+		Reset429Backoff(channelError.ChannelId)
+		subject := fmt.Sprintf("通道「%s」（#%d）已被永久隔离", channelError.ChannelName, channelError.ChannelId)
+		content := fmt.Sprintf("通道「%s」（#%d）已被永久隔离，原因：%s", channelError.ChannelName, channelError.ChannelId, reason)
+		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusManuallyDisabled), subject, content)
+	}
+}
+
 func EnableChannel(channelId int, usingKey string, channelName string) {
 	success := model.UpdateChannelStatus(channelId, usingKey, common.ChannelStatusEnabled, "")
 	if success {
@@ -110,6 +127,36 @@ func Is429ChannelError(err *types.NewAPIError) bool {
 		return false
 	}
 	return err.StatusCode == 429
+}
+
+func ShouldHardDisableChannel(err *types.NewAPIError) bool {
+	if err == nil || Is429ChannelError(err) {
+		return false
+	}
+
+	switch err.GetErrorCode() {
+	case types.ErrorCodeChannelNoAvailableKey, types.ErrorCodeChannelInvalidKey:
+		return true
+	}
+
+	lowerMessage := strings.ToLower(err.ErrorWithStatusCode())
+	hardFailureMarkers := []string{
+		"authorization failed",
+		"permission denied",
+		"not authorized",
+		"invalid api key",
+		"invalid key",
+		"invalid token",
+		"security token",
+		"no enabled keys",
+		"no keys available",
+	}
+	for _, marker := range hardFailureMarkers {
+		if strings.Contains(lowerMessage, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func ShouldDisableChannel(err *types.NewAPIError) bool {

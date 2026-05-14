@@ -676,10 +676,6 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 			//CacheUpdateChannel(channelCache)
 			//return true
 		} else {
-			// 如果缓存渠道存在，且状态已是目标状态，直接返回
-			if channelCache.Status == status {
-				return false
-			}
 			CacheUpdateChannelStatus(channelId, status)
 		}
 	}

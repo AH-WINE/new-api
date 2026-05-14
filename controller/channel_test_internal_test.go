@@ -6,6 +6,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
@@ -68,4 +69,11 @@ func TestBuildTestLogOtherInjectsTieredInfo(t *testing.T) {
 	require.Equal(t, "tiered_expr", other["billing_mode"])
 	require.Equal(t, "base", other["matched_tier"])
 	require.NotEmpty(t, other["expr_b64"])
+}
+
+func TestShouldSkipAutomaticChannelTestSkipsHardQuarantineStatuses(t *testing.T) {
+	require.True(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusUnknown}))
+	require.True(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusManuallyDisabled}))
+	require.False(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusAutoDisabled}))
+	require.False(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusEnabled}))
 }

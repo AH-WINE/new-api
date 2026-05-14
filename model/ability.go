@@ -128,12 +128,21 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 }
 
 func GetChannel(group string, model string, retry int) (*Channel, error) {
+	return GetChannelExcluding(group, model, retry, nil)
+}
+
+func GetChannelExcluding(group string, model string, retry int, excluded map[int]struct{}) (*Channel, error) {
 	var abilities []Ability
 
 	var err error = nil
-	channelQuery, err := getChannelQuery(group, model, retry)
-	if err != nil {
-		return nil, err
+	var channelQuery *gorm.DB
+	if len(excluded) > 0 {
+		channelQuery = DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
+	} else {
+		channelQuery, err = getChannelQuery(group, model, retry)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if common.UsingSQLite || common.UsingPostgreSQL {
 		err = channelQuery.Order("weight DESC").Find(&abilities).Error
@@ -142,6 +151,46 @@ func GetChannel(group string, model string, retry int) (*Channel, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if len(excluded) > 0 {
+		filtered := abilities[:0]
+		for _, ability := range abilities {
+			if _, skip := excluded[ability.ChannelId]; skip {
+				continue
+			}
+			filtered = append(filtered, ability)
+		}
+		abilities = filtered
+		if len(abilities) > 0 {
+			uniquePriorities := make(map[int]struct{})
+			for _, ability := range abilities {
+				priority := 0
+				if ability.Priority != nil {
+					priority = int(*ability.Priority)
+				}
+				uniquePriorities[priority] = struct{}{}
+			}
+			priorities := make([]int, 0, len(uniquePriorities))
+			for priority := range uniquePriorities {
+				priorities = append(priorities, priority)
+			}
+			sort.Sort(sort.Reverse(sort.IntSlice(priorities)))
+			if retry >= len(priorities) {
+				retry = len(priorities) - 1
+			}
+			targetPriority := priorities[retry]
+			priorityFiltered := abilities[:0]
+			for _, ability := range abilities {
+				priority := 0
+				if ability.Priority != nil {
+					priority = int(*ability.Priority)
+				}
+				if priority == targetPriority {
+					priorityFiltered = append(priorityFiltered, ability)
+				}
+			}
+			abilities = priorityFiltered
+		}
 	}
 	channel := Channel{}
 	if len(abilities) > 0 {

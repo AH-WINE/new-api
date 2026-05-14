@@ -650,6 +650,18 @@ func shouldUseStreamForAutomaticChannelTest(channel *model.Channel) bool {
 	return channel != nil && channel.Type == constant.ChannelTypeCodex
 }
 
+func shouldSkipAutomaticChannelTest(channel *model.Channel) bool {
+	if channel == nil {
+		return true
+	}
+	switch channel.Status {
+	case common.ChannelStatusUnknown, common.ChannelStatusManuallyDisabled:
+		return true
+	default:
+		return false
+	}
+}
+
 func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 	if len(jsonBytes) == 0 {
 		return ""
@@ -897,7 +909,7 @@ func testAllChannels(notify bool) error {
 		}()
 
 		for _, channel := range channels {
-			if channel.Status == common.ChannelStatusManuallyDisabled {
+			if shouldSkipAutomaticChannelTest(channel) {
 				continue
 			}
 			isChannelEnabled := channel.Status == common.ChannelStatusEnabled
