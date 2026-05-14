@@ -74,6 +74,12 @@ func TestBuildTestLogOtherInjectsTieredInfo(t *testing.T) {
 func TestShouldSkipAutomaticChannelTestSkipsHardQuarantineStatuses(t *testing.T) {
 	require.True(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusUnknown}))
 	require.True(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusManuallyDisabled}))
+	require.True(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusQuarantined}))
 	require.False(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusAutoDisabled}))
 	require.False(t, shouldSkipAutomaticChannelTest(&model.Channel{Status: common.ChannelStatusEnabled}))
+}
+
+func TestParseStatusFilterSupportsQuarantined(t *testing.T) {
+	require.Equal(t, common.ChannelStatusQuarantined, parseStatusFilter("quarantined"))
+	require.Equal(t, common.ChannelStatusQuarantined, parseStatusFilter("4"))
 }

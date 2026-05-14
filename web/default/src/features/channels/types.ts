@@ -40,7 +40,7 @@ export const channelSchema = z.object({
   key: z.string(),
   openai_organization: z.string().nullish(),
   test_model: z.string().nullish(),
-  status: z.number(), // 1: enabled, 0: manual disabled, 2: auto disabled
+  status: z.number(), // 0 unknown, 1 enabled, 2 manual disabled, 3 auto disabled, 4 quarantined
   name: z.string(),
   weight: z.number().nullish(),
   created_time: z.number(),
@@ -176,7 +176,7 @@ export interface CopyChannelResponse {
 
 export interface KeyStatus {
   index: number
-  status: number // 1: enabled, 2: manual disabled, 3: auto disabled
+  status: number // 1 enabled, 2 manual disabled, 3 auto disabled, 4 quarantined
   disabled_time?: number
   reason?: string
   key_preview?: string
@@ -205,6 +205,7 @@ export interface MultiKeyStatusResponse {
     enabled_count: number
     manual_disabled_count: number
     auto_disabled_count: number
+    quarantined_count: number
   }
 }
 

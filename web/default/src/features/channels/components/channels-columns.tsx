@@ -53,7 +53,11 @@ import {
   textColorMap,
 } from '@/components/status-badge'
 import { getCodexUsage } from '../api'
-import { CHANNEL_STATUS_CONFIG, MODEL_FETCHABLE_TYPES } from '../constants'
+import {
+  CHANNEL_STATUS,
+  CHANNEL_STATUS_CONFIG,
+  MODEL_FETCHABLE_TYPES,
+} from '../constants'
 import {
   formatBalance,
   formatRelativeTime,
@@ -735,7 +739,7 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
         // Tag row: show aggregated status
         if (isTagRow) {
           const childrenCount = (row.original as TagRow).children?.length || 0
-          const hasEnabled = status === 1
+          const hasEnabled = status === CHANNEL_STATUS.ENABLED
 
           if (hasEnabled) {
             return (
@@ -775,8 +779,11 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
             ? `${t(config.label)} (${enabledCount}/${keySize})`
             : t(config.label)
 
-        // Auto-disabled: show reason and time tooltip
-        if (status === 3) {
+        // Auto-disabled and quarantined: show reason and time tooltip
+        if (
+          status === CHANNEL_STATUS.AUTO_DISABLED ||
+          status === CHANNEL_STATUS.QUARANTINED
+        ) {
           let statusReason = ''
           let statusTime = ''
           try {
@@ -839,8 +846,11 @@ export function useChannelsColumns(): ColumnDef<Channel>[] {
       filterFn: (row, id, value) => {
         if (!value || value.length === 0 || value.includes('all')) return true
         const status = row.getValue(id) as number
-        if (value.includes('enabled')) return status === 1
-        if (value.includes('disabled')) return status !== 1
+        if (value.includes('enabled')) return status === CHANNEL_STATUS.ENABLED
+        if (value.includes('quarantined')) {
+          return status === CHANNEL_STATUS.QUARANTINED
+        }
+        if (value.includes('disabled')) return status !== CHANNEL_STATUS.ENABLED
         return false
       },
       size: 120,

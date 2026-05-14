@@ -655,7 +655,7 @@ func shouldSkipAutomaticChannelTest(channel *model.Channel) bool {
 		return true
 	}
 	switch channel.Status {
-	case common.ChannelStatusUnknown, common.ChannelStatusManuallyDisabled:
+	case common.ChannelStatusUnknown, common.ChannelStatusManuallyDisabled, common.ChannelStatusQuarantined:
 		return true
 	default:
 		return false

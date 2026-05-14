@@ -112,6 +112,7 @@ export const CHANNEL_STATUS = {
   ENABLED: 1,
   MANUAL_DISABLED: 2,
   AUTO_DISABLED: 3,
+  QUARANTINED: 4,
 } as const
 
 export const CHANNEL_STATUS_LABELS = {
@@ -119,12 +120,14 @@ export const CHANNEL_STATUS_LABELS = {
   [CHANNEL_STATUS.ENABLED]: 'Enabled',
   [CHANNEL_STATUS.MANUAL_DISABLED]: 'Disabled',
   [CHANNEL_STATUS.AUTO_DISABLED]: 'Auto Disabled',
+  [CHANNEL_STATUS.QUARANTINED]: 'Quarantined',
 } as const
 
 export const CHANNEL_STATUS_OPTIONS = [
   { value: 'all', label: 'All Status' },
   { value: 'enabled', label: 'Enabled' },
   { value: 'disabled', label: 'Disabled' },
+  { value: 'quarantined', label: 'Quarantined' },
 ] as const
 
 export const CHANNEL_STATUS_CONFIG = {
@@ -148,7 +151,12 @@ export const CHANNEL_STATUS_CONFIG = {
     label: 'Auto Disabled',
     showDot: true,
   },
-}
+  [CHANNEL_STATUS.QUARANTINED]: {
+    variant: 'warning' as const,
+    label: 'Quarantined',
+    showDot: true,
+  },
+} as const
 
 // ============================================================================
 // Multi-Key Status
@@ -158,12 +166,14 @@ export const MULTI_KEY_STATUS = {
   ENABLED: 1,
   MANUAL_DISABLED: 2,
   AUTO_DISABLED: 3,
+  QUARANTINED: 4,
 } as const
 
 export const MULTI_KEY_STATUS_LABELS = {
   [MULTI_KEY_STATUS.ENABLED]: 'Enabled',
   [MULTI_KEY_STATUS.MANUAL_DISABLED]: 'Manual Disabled',
   [MULTI_KEY_STATUS.AUTO_DISABLED]: 'Auto Disabled',
+  [MULTI_KEY_STATUS.QUARANTINED]: 'Quarantined',
 } as const
 
 export const MULTI_KEY_STATUS_CONFIG = {
@@ -179,7 +189,11 @@ export const MULTI_KEY_STATUS_CONFIG = {
     variant: 'danger' as const,
     label: 'Auto Disabled',
   },
-}
+  [MULTI_KEY_STATUS.QUARANTINED]: {
+    variant: 'warning' as const,
+    label: 'Quarantined',
+  },
+} as const
 
 // ============================================================================
 // Multi-Key Modes
@@ -208,6 +222,7 @@ export const MULTI_KEY_FILTER_OPTIONS = [
   { value: '1', label: 'Enabled' },
   { value: '2', label: 'Manual Disabled' },
   { value: '3', label: 'Auto Disabled' },
+  { value: '4', label: 'Quarantined' },
 ] as const
 
 export const MULTI_KEY_CONFIRM_MESSAGES = {

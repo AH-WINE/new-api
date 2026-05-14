@@ -102,12 +102,12 @@ func HardDisableChannel(channelError types.ChannelError, reason string) {
 		return
 	}
 
-	success := model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusManuallyDisabled, reason)
+	success := model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusQuarantined, reason)
 	if success {
 		Reset429Backoff(channelError.ChannelId)
 		subject := fmt.Sprintf("通道「%s」（#%d）已被永久隔离", channelError.ChannelName, channelError.ChannelId)
 		content := fmt.Sprintf("通道「%s」（#%d）已被永久隔离，原因：%s", channelError.ChannelName, channelError.ChannelId, reason)
-		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusManuallyDisabled), subject, content)
+		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusQuarantined), subject, content)
 	}
 }
 

@@ -359,7 +359,7 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
 	if channelError.AutoBan && service.ShouldHardDisableChannel(err) {
-		model.CacheUpdateChannelStatus(channelError.ChannelId, common.ChannelStatusManuallyDisabled)
+		model.CacheUpdateChannelStatus(channelError.ChannelId, common.ChannelStatusQuarantined)
 		gopool.Go(func() {
 			service.HardDisableChannel(channelError, err.ErrorWithStatusCode())
 		})

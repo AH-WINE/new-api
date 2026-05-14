@@ -56,6 +56,8 @@ func parseStatusFilter(statusParam string) int {
 		return common.ChannelStatusEnabled
 	case "disabled", "0":
 		return 0
+	case "quarantined", "quarantine", "4":
+		return common.ChannelStatusQuarantined
 	default:
 		return -1
 	}
@@ -111,6 +113,9 @@ func GetAllChannels(c *gin.Context) {
 				if statusFilter == 0 && ch.Status == common.ChannelStatusEnabled {
 					continue
 				}
+				if statusFilter > common.ChannelStatusEnabled && ch.Status != statusFilter {
+					continue
+				}
 				if typeFilter >= 0 && ch.Type != typeFilter {
 					continue
 				}
@@ -128,6 +133,8 @@ func GetAllChannels(c *gin.Context) {
 			baseQuery = baseQuery.Where("status = ?", common.ChannelStatusEnabled)
 		} else if statusFilter == 0 {
 			baseQuery = baseQuery.Where("status != ?", common.ChannelStatusEnabled)
+		} else if statusFilter > common.ChannelStatusEnabled {
+			baseQuery = baseQuery.Where("status = ?", statusFilter)
 		}
 
 		baseQuery.Count(&total)
@@ -149,6 +156,8 @@ func GetAllChannels(c *gin.Context) {
 		countQuery = countQuery.Where("status = ?", common.ChannelStatusEnabled)
 	} else if statusFilter == 0 {
 		countQuery = countQuery.Where("status != ?", common.ChannelStatusEnabled)
+	} else if statusFilter > common.ChannelStatusEnabled {
+		countQuery = countQuery.Where("status = ?", statusFilter)
 	}
 	var results []struct {
 		Type  int64
@@ -280,13 +289,16 @@ func SearchChannels(c *gin.Context) {
 		channelData = channels
 	}
 
-	if statusFilter == common.ChannelStatusEnabled || statusFilter == 0 {
+	if statusFilter == common.ChannelStatusEnabled || statusFilter == 0 || statusFilter > common.ChannelStatusEnabled {
 		filtered := make([]*model.Channel, 0, len(channelData))
 		for _, ch := range channelData {
 			if statusFilter == common.ChannelStatusEnabled && ch.Status != common.ChannelStatusEnabled {
 				continue
 			}
 			if statusFilter == 0 && ch.Status == common.ChannelStatusEnabled {
+				continue
+			}
+			if statusFilter > common.ChannelStatusEnabled && ch.Status != statusFilter {
 				continue
 			}
 			filtered = append(filtered, ch)
@@ -1211,7 +1223,7 @@ type MultiKeyManageRequest struct {
 	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
 	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
 	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
-	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
+	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, 4=quarantined, nil=all
 }
 
 // MultiKeyStatusResponse represents the response for key status query
@@ -1225,11 +1237,12 @@ type MultiKeyStatusResponse struct {
 	EnabledCount        int `json:"enabled_count"`
 	ManualDisabledCount int `json:"manual_disabled_count"`
 	AutoDisabledCount   int `json:"auto_disabled_count"`
+	QuarantinedCount    int `json:"quarantined_count"`
 }
 
 type KeyStatus struct {
 	Index        int    `json:"index"`
-	Status       int    `json:"status"` // 1: enabled, 2: disabled
+	Status       int    `json:"status"` // 1: enabled, 2: manual disabled, 3: auto disabled, 4: quarantined
 	DisabledTime int64  `json:"disabled_time,omitempty"`
 	Reason       string `json:"reason,omitempty"`
 	KeyPreview   string `json:"key_preview"` // first 10 chars of key for identification
@@ -1280,7 +1293,7 @@ func ManageMultiKeys(c *gin.Context) {
 		}
 
 		// Statistics for all keys (unchanged by filtering)
-		var enabledCount, manualDisabledCount, autoDisabledCount int
+		var enabledCount, manualDisabledCount, autoDisabledCount, quarantinedCount int
 
 		// Build all key status data first
 		var allKeyStatusList []KeyStatus
@@ -1297,15 +1310,17 @@ func ManageMultiKeys(c *gin.Context) {
 
 			// Count for statistics (all keys)
 			switch status {
-			case 1:
+			case common.ChannelStatusEnabled:
 				enabledCount++
-			case 2:
+			case common.ChannelStatusManuallyDisabled:
 				manualDisabledCount++
-			case 3:
+			case common.ChannelStatusAutoDisabled:
 				autoDisabledCount++
+			case common.ChannelStatusQuarantined:
+				quarantinedCount++
 			}
 
-			if status != 1 {
+			if status != common.ChannelStatusEnabled {
 				if channel.ChannelInfo.MultiKeyDisabledTime != nil {
 					disabledTime = channel.ChannelInfo.MultiKeyDisabledTime[i]
 				}
@@ -1376,6 +1391,7 @@ func ManageMultiKeys(c *gin.Context) {
 				EnabledCount:        enabledCount,        // Overall statistics
 				ManualDisabledCount: manualDisabledCount, // Overall statistics
 				AutoDisabledCount:   autoDisabledCount,   // Overall statistics
+				QuarantinedCount:    quarantinedCount,    // Overall statistics
 			},
 		})
 		return

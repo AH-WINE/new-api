@@ -93,6 +93,7 @@ export function MultiKeyManageDialog({
   const [enabledCount, setEnabledCount] = useState(0)
   const [manualDisabledCount, setManualDisabledCount] = useState(0)
   const [autoDisabledCount, setAutoDisabledCount] = useState(0)
+  const [quarantinedCount, setQuarantinedCount] = useState(0)
 
   // UI state
   const [statusFilter, setStatusFilter] = useState<number | null>(null)
@@ -135,6 +136,7 @@ export function MultiKeyManageDialog({
         setEnabledCount(response.data.enabled_count || 0)
         setManualDisabledCount(response.data.manual_disabled_count || 0)
         setAutoDisabledCount(response.data.auto_disabled_count || 0)
+        setQuarantinedCount(response.data.quarantined_count || 0)
       }
     } catch (error: unknown) {
       toast.error(
@@ -253,7 +255,7 @@ export function MultiKeyManageDialog({
 
           <div className='flex min-h-0 flex-1 flex-col space-y-4 overflow-hidden'>
             {/* Statistics */}
-            <div className='grid shrink-0 grid-cols-3 gap-3'>
+            <div className='grid shrink-0 grid-cols-4 gap-3'>
               <StatisticsCard
                 label={t('Enabled')}
                 count={enabledCount}
@@ -267,6 +269,11 @@ export function MultiKeyManageDialog({
               <StatisticsCard
                 label={t('Auto Disabled')}
                 count={autoDisabledCount}
+                total={total}
+              />
+              <StatisticsCard
+                label={t('Quarantined')}
+                count={quarantinedCount}
                 total={total}
               />
             </div>
@@ -309,7 +316,8 @@ export function MultiKeyManageDialog({
                   <RefreshCw className='h-4 w-4' />
                 </Button>
 
-                {manualDisabledCount + autoDisabledCount > 0 && (
+                {manualDisabledCount + autoDisabledCount + quarantinedCount >
+                  0 && (
                   <Button
                     variant='default'
                     size='sm'
