@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -1050,4 +1051,60 @@ func CountChannelsGroupByType() (map[int64]int64, error) {
 		counts[r.Type] = r.Count
 	}
 	return counts, nil
+}
+
+// ─── 429 cooldown auto-recovery (inline in channel cache sync) ──────────
+
+// TryRecover429Cooldown checks whether an auto-disabled channel has an expired
+// 429 cooldown recorded in other_info.status_reason. If expired, it updates the
+// DB status back to enabled and clears other_info.
+// Returns true if the channel was recovered.
+// This exists so that 429 cooldown recovery does NOT depend on the automatic
+// channel test cron (CHANNEL_TEST_FREQUENCY) — it runs on every cache sync.
+func TryRecover429Cooldown(channel *Channel) bool {
+	if channel == nil || channel.Status != common.ChannelStatusAutoDisabled {
+		return false
+	}
+	info := channel.GetOtherInfo()
+	reason, _ := info["status_reason"].(string)
+	if reason == "" || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(reason)), "429 rate-limit") {
+		return false
+	}
+	expireAt, ok := parse429Expire(reason)
+	if !ok || time.Now().Before(expireAt) {
+		return false
+	}
+	// Cooldown expired — recover in DB
+	DB.Model(channel).Updates(map[string]interface{}{
+		"status":     common.ChannelStatusEnabled,
+		"other_info": "{}",
+	})
+	channel.Status = common.ChannelStatusEnabled
+	channel.OtherInfo = "{}"
+	common.SysLog(fmt.Sprintf("通道「%s」（#%d）429 cooldown 到期（expire=%s），缓存同步时自动恢复",
+		channel.Name, channel.Id, expireAt.Format(time.RFC3339)))
+	return true
+}
+
+// parse429Expire extracts the RFC3339 expire time from a 429 cooldown reason string.
+// Expected format: "429 rate-limit (cooldown=45s, expire=2026-05-16T20:37:36Z, level=0)"
+func parse429Expire(reason string) (time.Time, bool) {
+	marker := "expire="
+	idx := strings.Index(reason, marker)
+	if idx < 0 {
+		return time.Time{}, false
+	}
+	value := reason[idx+len(marker):]
+	end := len(value)
+	for _, sep := range []string{",", ")", " "} {
+		if sepIdx := strings.Index(value, sep); sepIdx >= 0 && sepIdx < end {
+			end = sepIdx
+		}
+	}
+	expireRaw := strings.TrimSpace(value[:end])
+	expireAt, err := time.Parse(time.RFC3339, expireRaw)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return expireAt, true
 }

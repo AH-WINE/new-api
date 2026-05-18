@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 	"strings"
@@ -17,6 +18,114 @@ import (
 var group2model2channels map[string]map[string][]int // enabled channel
 var channelsIDM map[int]*Channel                     // all channels include disabled
 var channelSyncLock sync.RWMutex
+
+// ─── Per-channel rate limiting (NVIDIA free tier: 40 RPM per key) ──────
+// Token bucket: each key refills at 40/60 = 0.667 tokens/sec, max burst=1.
+// Unlike a flat cooldown (which locks ALL keys after a uniform burst), token
+// buckets refill continuously → keys stagger back online → no dead zone.
+// Scales linearly: 80 keys → 80 × 40 RPM = 3200 req/min total capacity.
+
+const nvTokensPerKeyPerSec = 40.0 / 60.0 // 0.667 tokens/sec = 1 token / 1.5s
+
+type tokenBucket struct {
+	tokens     float64   // available tokens (capped at burstSize)
+	lastRefill time.Time // last refill timestamp
+}
+
+var channelTokenBuckets sync.Map // channelId (int) → *tokenBucket
+
+func tryConsumeChannelToken(channelId int) bool {
+	const burstSize = 1.0 // max tokens per key (1 = 40 RPM)
+
+	val, _ := channelTokenBuckets.LoadOrStore(channelId, &tokenBucket{
+		tokens:     burstSize, // start full
+		lastRefill: time.Now(),
+	})
+	bucket := val.(*tokenBucket)
+
+	elapsed := time.Since(bucket.lastRefill).Seconds()
+	bucket.tokens += elapsed * nvTokensPerKeyPerSec
+	if bucket.tokens > burstSize {
+		bucket.tokens = burstSize
+	}
+	bucket.lastRefill = time.Now()
+
+	if bucket.tokens >= 1.0 {
+		bucket.tokens -= 1.0
+		return true
+	}
+	// Save updated lastRefill even when no token consumed (prevents clock drift)
+	return false
+}
+
+// hasChannelToken checks if a channel has enough tokens WITHOUT consuming.
+// Use this to filter candidate channels during selection.
+func hasChannelToken(channelId int) bool {
+	val, _ := channelTokenBuckets.LoadOrStore(channelId, &tokenBucket{
+		tokens:     1.0,
+		lastRefill: time.Now(),
+	})
+	bucket := val.(*tokenBucket)
+	elapsed := time.Since(bucket.lastRefill).Seconds()
+	// calculate projected tokens but don't save — just check
+	projected := bucket.tokens + elapsed*nvTokensPerKeyPerSec
+	if projected > 1.0 {
+		projected = 1.0
+	}
+	return projected >= 1.0
+}
+
+// consumeChannelToken consumes one token from a channel's bucket.
+// Call AFTER the channel has been selected.
+func consumeChannelToken(channelId int) {
+	val, _ := channelTokenBuckets.LoadOrStore(channelId, &tokenBucket{
+		tokens:     1.0,
+		lastRefill: time.Now(),
+	})
+	bucket := val.(*tokenBucket)
+
+	elapsed := time.Since(bucket.lastRefill).Seconds()
+	bucket.tokens += elapsed * nvTokensPerKeyPerSec
+	if bucket.tokens > 1.0 {
+		bucket.tokens = 1.0
+	}
+	bucket.lastRefill = time.Now()
+
+	if bucket.tokens >= 1.0 {
+		bucket.tokens -= 1.0
+	}
+}
+
+type ChannelTokenBucketInfo struct {
+	ChannelId int     `json:"channel_id"`
+	Tokens    float64 `json:"tokens"`
+	CoolDownS float64 `json:"cooldown_s"` // estimated seconds until next token
+}
+
+func GetTokenBucketStatus() []ChannelTokenBucketInfo {
+	var result []ChannelTokenBucketInfo
+	channelTokenBuckets.Range(func(key, value interface{}) bool {
+		channelId := key.(int)
+		bucket := value.(*tokenBucket)
+		elapsed := time.Since(bucket.lastRefill).Seconds()
+		tokens := bucket.tokens + elapsed*nvTokensPerKeyPerSec
+		if tokens > 1.0 {
+			tokens = 1.0
+		}
+		cooldown := 0.0
+		if tokens < 1.0 {
+			cooldown = (1.0 - tokens) / nvTokensPerKeyPerSec
+		}
+		result = append(result, ChannelTokenBucketInfo{
+			ChannelId: channelId,
+			Tokens:    math.Round(tokens*1000) / 1000,
+			CoolDownS: math.Round(cooldown*100) / 100,
+		})
+		return true
+	})
+	sort.Slice(result, func(i, j int) bool { return result[i].ChannelId < result[j].ChannelId })
+	return result
+}
 
 func InitChannelCache() {
 	if !common.MemoryCacheEnabled {
@@ -39,6 +148,11 @@ func InitChannelCache() {
 		newGroup2model2channels[group] = make(map[string][]int)
 	}
 	for _, channel := range channels {
+		if channel.Status == common.ChannelStatusAutoDisabled {
+			// Auto-recover expired 429 cooldowns inline so recovery doesn't
+			// depend on the automatic channel test cron (CHANNEL_TEST_FREQUENCY).
+			TryRecover429Cooldown(channel)
+		}
 		if channel.Status != common.ChannelStatusEnabled {
 			continue // skip disabled channels
 		}
@@ -92,6 +206,38 @@ func SyncChannelCache(frequency int) {
 		InitChannelCache()
 	}
 }
+
+// computeLatencyWeight maps channel response_time (milliseconds) to a weight value
+// used for latency-aware weighted random channel selection.
+// Faster channels get higher weight. Very slow channels (>20s) get weight=1
+// (virtually excluded unless the pool is exhausted).
+// Untested channels (response_time=0) start at weight=100 (neutral).
+func computeLatencyWeight(responseTime int) int {
+	if responseTime <= 0 {
+		return 100 // untested channel: default neutral weight
+	}
+	rt := responseTime
+	if rt < 500 {
+		rt = 500
+	}
+	// Channels slower than 20s: weight=1 (absolute minimum, only in fallback)
+	if rt > 20000 {
+		return 1
+	}
+	w := 100000 / rt
+	if w < 1 {
+		w = 1
+	}
+	if w > 200 {
+		w = 200
+	}
+	return w
+}
+
+// MIN_HEALTHY_POOL_429: minimum number of enabled channels for a model-group
+// below which 429 errors will NOT trigger auto-disable. Prevents cascading pool
+// collapse when a burst of concurrent requests triggers 429s across many channels.
+const MIN_HEALTHY_POOL_429 = 20
 
 func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel, error) {
 	return GetRandomSatisfiedChannelExcluding(group, model, retry, nil)
@@ -158,14 +304,27 @@ func GetRandomSatisfiedChannelExcluding(group string, model string, retry int, e
 	// get the priority for the given retry number
 	var sumWeight = 0
 	var targetChannels []*Channel
+	var rateLimitedChannels []*Channel
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
 			if channel.GetPriority() == targetPriority {
-				sumWeight += channel.GetWeight()
-				targetChannels = append(targetChannels, channel)
+				if !hasChannelToken(channel.Id) {
+					rateLimitedChannels = append(rateLimitedChannels, channel)
+				} else {
+					sumWeight += channel.GetWeight()
+					targetChannels = append(targetChannels, channel)
+				}
 			}
 		} else {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+		}
+	}
+
+	// If all channels are rate-limited (burst > pool capacity), fall back to all channels
+	if len(targetChannels) == 0 && len(rateLimitedChannels) > 0 {
+		targetChannels = rateLimitedChannels
+		for _, ch := range targetChannels {
+			sumWeight += ch.GetWeight()
 		}
 	}
 
@@ -173,15 +332,22 @@ func GetRandomSatisfiedChannelExcluding(group string, model string, retry int, e
 		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
 	}
 
-	// smoothing factor and adjustment
+	// Per-channel effective weights for weighted random selection.
+	// When all channels have weight=0 (default), we use latency-based weighting.
+	channelWeights := make(map[int]int, len(targetChannels))
 	smoothingFactor := 1
 	smoothingAdjustment := 0
 
 	if sumWeight == 0 {
-		// when all channels have weight 0, set sumWeight to the number of channels and set smoothing adjustment to 100
-		// each channel's effective weight = 100
-		sumWeight = len(targetChannels) * 100
-		smoothingAdjustment = 100
+		// All channels at default weight: use latency-based weighting.
+		// Fast channels (low response_time) get higher selection probability.
+		for _, channel := range targetChannels {
+			w := computeLatencyWeight(channel.ResponseTime)
+			channelWeights[channel.Id] = w
+			sumWeight += w
+		}
+		// No base offset needed — weights already encode the distribution.
+		smoothingAdjustment = 0
 	} else if sumWeight/len(targetChannels) < 10 {
 		// when the average weight is less than 10, set smoothing factor to 100
 		smoothingFactor = 100
@@ -195,13 +361,35 @@ func GetRandomSatisfiedChannelExcluding(group string, model string, retry int, e
 
 	// Find a channel based on its weight
 	for _, channel := range targetChannels {
-		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
+		w := channel.GetWeight()
+		if effectiveW, ok := channelWeights[channel.Id]; ok {
+			w = effectiveW
+		}
+		randomWeight -= w*smoothingFactor + smoothingAdjustment
 		if randomWeight < 0 {
+			consumeChannelToken(channel.Id)
 			return channel, nil
 		}
 	}
 	// return null if no channel is not found
 	return nil, errors.New("channel not found")
+}
+
+// CountEnabledChannels returns the number of enabled channels for a given group and model.
+// Uses the in-memory cache; returns 0 if memory cache is disabled.
+func CountEnabledChannels(group string, model string) int {
+	if !common.MemoryCacheEnabled {
+		return 0
+	}
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+	channels := group2model2channels[group][model]
+	if len(channels) == 0 {
+		// Try normalized model name
+		normalizedModel := ratio_setting.FormatMatchingModelName(model)
+		channels = group2model2channels[group][normalizedModel]
+	}
+	return len(channels)
 }
 
 func CacheGetChannel(id int) (*Channel, error) {
