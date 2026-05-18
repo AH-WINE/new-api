@@ -1108,3 +1108,164 @@ func parse429Expire(reason string) (time.Time, bool) {
 	}
 	return expireAt, true
 }
+
+// ─── Soft-degrade: timeout → weight reduction instead of hard-disable ──────
+
+// SoftDegrade counts for timeout-based auto-recovery.
+const (
+	softDegradeKeyTimeouts   = "sd_timeouts"   // int: consecutive timeout count
+	softDegradeKeySuccesses  = "sd_successes"  // int: consecutive success count
+	softDegradeKeyOrigWeight = "sd_orig_weight" // int: original weight before degrade
+	softDegradeKeyActive     = "sd_active"      // bool: currently soft-degraded
+)
+
+// Default thresholds — overridable via options table.
+var (
+	TimeoutDegradeThreshold    float64 = 180.0 // seconds: treat as "slow" (was 90)
+	TimeoutHardDisableCount    int     = 3     // consecutive timeouts before hard-disable
+	TimeoutRecoveryCount       int     = 3     // consecutive successes before recovery
+)
+
+// GetSoftDegradeInfo reads soft-degrade counters from other_info.
+func (channel *Channel) GetSoftDegradeInfo() (timeouts int, successes int, origWeight int, active bool) {
+	info := channel.GetOtherInfo()
+	if v, ok := info[softDegradeKeyTimeouts].(float64); ok {
+		timeouts = int(v)
+	}
+	if v, ok := info[softDegradeKeySuccesses].(float64); ok {
+		successes = int(v)
+	}
+	if v, ok := info[softDegradeKeyOrigWeight].(float64); ok {
+		origWeight = int(v)
+	}
+	if v, ok := info[softDegradeKeyActive].(bool); ok {
+		active = v
+	}
+	return
+}
+
+// SetSoftDegradeInfo writes soft-degrade counters back to other_info.
+func (channel *Channel) SetSoftDegradeInfo(timeouts int, successes int, origWeight int, active bool) {
+	info := channel.GetOtherInfo()
+	info[softDegradeKeyTimeouts] = float64(timeouts)
+	info[softDegradeKeySuccesses] = float64(successes)
+	info[softDegradeKeyOrigWeight] = float64(origWeight)
+	info[softDegradeKeyActive] = active
+	channel.SetOtherInfo(info)
+}
+
+// TrySoftDegrade is called when a probe times out. It increments the timeout counter
+// and degrades the channel weight. If consecutive timeouts exceed the hard-disable
+// threshold, it returns true (caller should hard-disable). Otherwise it soft-degrades.
+func TrySoftDegrade(channel *Channel) (shouldHardDisable bool) {
+	if channel == nil {
+		return false
+	}
+	timeouts, _, origWeight, _ := channel.GetSoftDegradeInfo()
+	timeouts++
+
+	if timeouts >= TimeoutHardDisableCount {
+		// Hard-disable: clear soft-degrade state, let testAllChannels ban normally
+		channel.SetSoftDegradeInfo(0, 0, 0, false)
+		return true
+	}
+
+	// Soft-degrade: save original weight once, set weight=1
+	if origWeight == 0 {
+		if channel.Weight != nil {
+			origWeight = int(*channel.Weight)
+		}
+	}
+	channel.SetSoftDegradeInfo(timeouts, 0, origWeight, true)
+
+	// Update weight in DB + memory
+	weightOne := uint(1)
+	DB.Model(channel).Update("weight", weightOne)
+	channel.Weight = &weightOne
+
+	common.SysLog(fmt.Sprintf("通道「%s」（#%d）响应超时软降级: weight=%d→1, timeouts=%d/%d",
+		channel.Name, channel.Id, origWeight, timeouts, TimeoutHardDisableCount))
+	return false
+}
+
+// TryRecoverSoftDegrade is called when a probe succeeds for a soft-degraded channel.
+// It increments the success counter. When enough consecutive successes accumulate,
+// it restores the original weight. Returns true if fully recovered.
+func TryRecoverSoftDegrade(channel *Channel) (recovered bool) {
+	if channel == nil {
+		return false
+	}
+	_, successes, origWeight, active := channel.GetSoftDegradeInfo()
+	if !active {
+		return false
+	}
+	successes++
+	if successes < TimeoutRecoveryCount {
+		channel.SetSoftDegradeInfo(0, successes, origWeight, true)
+		common.SysLog(fmt.Sprintf("通道「%s」（#%d）软降级恢复中: successes=%d/%d",
+			channel.Name, channel.Id, successes, TimeoutRecoveryCount))
+		return false
+	}
+
+	// Fully recovered — restore weight
+	restoreWeight := uint(origWeight)
+	if origWeight <= 0 {
+		restoreWeight = 0 // let latency-weighting take over
+	}
+	DB.Model(channel).Update("weight", restoreWeight)
+	channel.Weight = &restoreWeight
+	channel.SetSoftDegradeInfo(0, 0, 0, false)
+
+	common.SysLog(fmt.Sprintf("通道「%s」（#%d）软降级已恢复: weight 恢复为 %d",
+		channel.Name, channel.Id, restoreWeight))
+	return true
+}
+
+// IsTimeoutDisabledReason checks whether a channel was auto-disabled due to probe timeout.
+func IsTimeoutDisabledReason(reason string) bool {
+	return strings.Contains(reason, "超过阈值") ||
+		strings.Contains(reason, "response time exceeded") ||
+		strings.Contains(reason, "ChannelResponseTimeExceeded")
+}
+
+// TryRecoverTimeoutDisabled is called during cache sync for timeout-disabled channels.
+// If enough time has passed since the ban, it re-enables the channel so the next
+// probe cycle can test it. Returns true if recovered.
+func TryRecoverTimeoutDisabled(channel *Channel) bool {
+	if channel == nil || channel.Status != common.ChannelStatusAutoDisabled {
+		return false
+	}
+	info := channel.GetOtherInfo()
+	reason, _ := info["status_reason"].(string)
+	if !IsTimeoutDisabledReason(reason) {
+		return false
+	}
+	statusTimeRaw, ok := info["status_time"]
+	if !ok {
+		return false
+	}
+	var statusTime int64
+	switch v := statusTimeRaw.(type) {
+	case float64:
+		statusTime = int64(v)
+	case int64:
+		statusTime = v
+	default:
+		return false
+	}
+	// Allow recovery after 3× probe interval (30 min with CHANNEL_TEST_FREQUENCY=10)
+	recoveryInterval := time.Duration(3*10) * time.Minute
+	if time.Since(time.Unix(statusTime, 0)) < recoveryInterval {
+		return false
+	}
+
+	DB.Model(channel).Updates(map[string]interface{}{
+		"status":     common.ChannelStatusEnabled,
+		"other_info": "{}",
+	})
+	channel.Status = common.ChannelStatusEnabled
+	channel.OtherInfo = "{}"
+	common.SysLog(fmt.Sprintf("通道「%s」（#%d）超时禁用恢复：冷却已过，重新启用待探活验证",
+		channel.Name, channel.Id))
+	return true
+}

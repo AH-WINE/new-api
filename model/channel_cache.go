@@ -149,9 +149,13 @@ func InitChannelCache() {
 	}
 	for _, channel := range channels {
 		if channel.Status == common.ChannelStatusAutoDisabled {
-			// Auto-recover expired 429 cooldowns inline so recovery doesn't
-			// depend on the automatic channel test cron (CHANNEL_TEST_FREQUENCY).
-			TryRecover429Cooldown(channel)
+			// Auto-recover expired 429 cooldowns and timeout bans inline so
+			// recovery doesn't depend on the automatic channel test cron.
+			if TryRecover429Cooldown(channel) {
+				// recovered — proceed to add to pool
+			} else if TryRecoverTimeoutDisabled(channel) {
+				// recovered — proceed to add to pool
+			}
 		}
 		if channel.Status != common.ChannelStatusEnabled {
 			continue // skip disabled channels

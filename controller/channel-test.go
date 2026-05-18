@@ -939,14 +939,29 @@ func testAllChannels(notify bool) error {
 				is429Error = service.Is429ChannelError(result.newAPIError)
 			}
 
-			// 当错误检查通过，才检查响应时间
-			if common.AutomaticDisableChannelEnabled && !shouldBanChannel && !is429Error {
-				if milliseconds > disableThreshold {
-					err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
+// 当错误检查通过，才检查响应时间（使用软降级阈值）
+		if common.AutomaticDisableChannelEnabled && !shouldBanChannel && !is429Error {
+			softThreshold := int64(model.TimeoutDegradeThreshold * 1000)
+			if softThreshold <= 0 {
+				softThreshold = disableThreshold // fallback to legacy
+			}
+			if milliseconds > softThreshold {
+				// 软降级路径：先尝试降权，连续 N 次才 hard-disable
+				if model.TrySoftDegrade(channel) {
+					// 连续超时达到阈值 → hard-disable（走老路径）
+					err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs（连续 %d 次）",
+						float64(milliseconds)/1000.0, model.TimeoutDegradeThreshold, model.TimeoutHardDisableCount)
 					newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
 					shouldBanChannel = true
 				}
+				// If TrySoftDegrade returned false: soft-degraded, don't ban
 			}
+		}
+
+		// 对于软降级中但 probe 成功的 channel，推进恢复计数器
+		if isChannelEnabled && !shouldBanChannel && newAPIError == nil {
+			model.TryRecoverSoftDegrade(channel)
+		}
 
 			// disable channel
 			if isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
