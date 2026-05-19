@@ -222,6 +222,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
+			// Record relay latency for model auto-fallback
+			relayDurationSec := int(time.Since(relayInfo.StartTime).Seconds())
+			model.RecordModelRelayLatency(relayInfo.OriginModelName, relayDurationSec)
 			return
 		}
 
@@ -315,6 +318,14 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 
+	// ─── Model auto-fallback: rewrite OriginModelName so upstream sees the correct model ──
+	if fallbackTo, ok := common.GetContextKey(c, constant.ContextKeyModelFallbackTo); ok {
+		if fbModel, ok2 := fallbackTo.(string); ok2 && fbModel != "" {
+			logger.LogInfo(c, fmt.Sprintf("Model fallback active: %s → %s", info.OriginModelName, fbModel))
+			info.OriginModelName = fbModel
+		}
+	}
+
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
 	if newAPIError != nil {
 		return nil, newAPIError
@@ -364,11 +375,24 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			service.HardDisableChannel(channelError, err.ErrorWithStatusCode())
 		})
 	} else if channelError.AutoBan && service.Is429ChannelError(err) {
-		model.CacheUpdateChannelStatus(channelError.ChannelId, common.ChannelStatusAutoDisabled)
-		gopool.Go(func() {
-			_, reason := service.Record429BanWithReason(channelError.ChannelId)
-			service.DisableChannel(channelError, reason)
-		})
+		// 429 pool guard: don't disable if doing so would drop the pool below minimum.
+		// Concurrent bursts can 429 many channels simultaneously — disabling them all
+		// at once causes cascading pool collapse (every remaining channel gets hammered
+		// harder → more 429s → pool dries up completely).
+		poolSize := model.CountEnabledChannels("default", c.GetString("original_model"))
+		if poolSize <= model.MIN_HEALTHY_POOL_429 {
+			common.SysLog(fmt.Sprintf("通道 #%d 收到 429 但池子仅剩 %d 个通道（阈值=%d），暂不禁用，仅记录 cooldown",
+				channelError.ChannelId, poolSize, model.MIN_HEALTHY_POOL_429))
+			gopool.Go(func() {
+				service.Record429BanWithReason(channelError.ChannelId)
+			})
+		} else {
+			model.CacheUpdateChannelStatus(channelError.ChannelId, common.ChannelStatusAutoDisabled)
+			gopool.Go(func() {
+				_, reason := service.Record429BanWithReason(channelError.ChannelId)
+				service.DisableChannel(channelError, reason)
+			})
+		}
 	} else if service.ShouldDisableChannel(err) && channelError.AutoBan {
 		model.CacheUpdateChannelStatus(channelError.ChannelId, common.ChannelStatusAutoDisabled)
 		gopool.Go(func() {

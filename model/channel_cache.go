@@ -19,6 +19,95 @@ var group2model2channels map[string]map[string][]int // enabled channel
 var channelsIDM map[int]*Channel                     // all channels include disabled
 var channelSyncLock sync.RWMutex
 
+// ─── Model health for auto-fallback routing ─────────────────────────────
+
+// ModelFallbackPair defines a fallback route from one model to another.
+type ModelFallbackPair struct {
+	FallbackModel  string  `json:"fallback"`
+	ThresholdRatio float64 `json:"threshold_ratio"` // 0.0-1.0: switch when primary healthy ratio < this
+}
+
+// Fallback config — hardcoded pairs for now. Future: DB options.
+var modelFallbackMap = map[string]ModelFallbackPair{
+	"deepseek-ai/deepseek-v4-pro": {
+		FallbackModel:  "deepseek-ai/deepseek-v4-flash",
+		ThresholdRatio: 0.5, // route to flash when <50% pro channels healthy
+	},
+}
+
+// ModelHealthSnapshot captures per-model aggregate health from the last cache sync.
+type ModelHealthSnapshot struct {
+	TotalChannels   int     // total channels for this model (all statuses)
+	HealthyChannels int     // status=1 AND not soft-degraded
+	HealthyRatio    float64 // HealthyChannels / TotalChannels (or 0)
+	MedianLatencyMs int     // median response_time of healthy channels
+}
+
+var modelHealthMap map[string]*ModelHealthSnapshot // model name → health snapshot
+var modelHealthLock sync.RWMutex
+
+// ─── Per-model relay latency tracking (sliding window) ─────────────────
+// Updated on each relay completion; used by auto-fallback routing.
+
+const modelLatencyWindowSize = 20 // last N relay response times per model
+
+var modelLatenciesLock sync.Mutex
+var modelLatencies = make(map[string]*modelLatencyWindow)
+
+type modelLatencyWindow struct {
+	samples []int // relay duration in seconds, up to windowSize
+	idx     int
+}
+
+// RecordModelRelayLatency records a relay duration for a model.
+func RecordModelRelayLatency(modelName string, durationSec int) {
+	modelLatenciesLock.Lock()
+	defer modelLatenciesLock.Unlock()
+
+	w, ok := modelLatencies[modelName]
+	if !ok {
+		w = &modelLatencyWindow{samples: make([]int, 0, modelLatencyWindowSize)}
+		modelLatencies[modelName] = w
+	}
+
+	if len(w.samples) < modelLatencyWindowSize {
+		w.samples = append(w.samples, durationSec)
+	} else {
+		w.samples[w.idx] = durationSec
+		w.idx = (w.idx + 1) % modelLatencyWindowSize
+	}
+}
+
+// GetModelRelayLatencyP50 returns the median of recent relay durations in seconds.
+// Returns 0 if not enough samples.
+func GetModelRelayLatencyP50(modelName string) int {
+	modelLatenciesLock.Lock()
+	defer modelLatenciesLock.Unlock()
+
+	w, ok := modelLatencies[modelName]
+	if !ok || len(w.samples) < 3 {
+		return 0
+	}
+
+	sorted := make([]int, len(w.samples))
+	copy(sorted, w.samples)
+	sort.Ints(sorted)
+	return sorted[len(sorted)/2]
+}
+
+// GetModelHealth returns the cached health snapshot for a model. Thread-safe.
+func GetModelHealth(modelName string) *ModelHealthSnapshot {
+	modelHealthLock.RLock()
+	defer modelHealthLock.RUnlock()
+	return modelHealthMap[modelName]
+}
+
+// GetModelFallback returns the fallback pair for a model, if configured.
+func GetModelFallback(modelName string) (ModelFallbackPair, bool) {
+	pair, ok := modelFallbackMap[modelName]
+	return pair, ok
+}
+
 // ─── Per-channel rate limiting (NVIDIA free tier: 40 RPM per key) ──────
 // Token bucket: each key refills at 40/60 = 0.667 tokens/sec, max burst=1.
 // Unlike a flat cooldown (which locks ALL keys after a uniform burst), token
@@ -181,6 +270,50 @@ func InitChannelCache() {
 			newGroup2model2channels[group][model] = channels
 		}
 	}
+
+	// ─── Compute per-model health for auto-fallback routing ──────────────
+	newModelHealth := make(map[string]*ModelHealthSnapshot)
+	modelStats := make(map[string]*struct{ total, healthy int; lats []int })
+	for _, ch := range newChannelId2channel {
+		models := strings.Split(ch.Models, ",")
+		for _, m := range models {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			if modelStats[m] == nil {
+				modelStats[m] = &struct{ total, healthy int; lats []int }{}
+			}
+			modelStats[m].total++
+			if ch.Status == common.ChannelStatusEnabled {
+				_, _, _, isSoftDegraded := ch.GetSoftDegradeInfo()
+				if !isSoftDegraded {
+					modelStats[m].healthy++
+				}
+				modelStats[m].lats = append(modelStats[m].lats, ch.ResponseTime)
+			}
+		}
+	}
+	for m, s := range modelStats {
+		ratio := float64(0)
+		if s.total > 0 {
+			ratio = float64(s.healthy) / float64(s.total)
+		}
+		medianMs := 0
+		if len(s.lats) > 0 {
+			sort.Ints(s.lats)
+			medianMs = s.lats[len(s.lats)/2]
+		}
+		newModelHealth[m] = &ModelHealthSnapshot{
+			TotalChannels:   s.total,
+			HealthyChannels: s.healthy,
+			HealthyRatio:    ratio,
+			MedianLatencyMs: medianMs,
+		}
+	}
+	modelHealthLock.Lock()
+	modelHealthMap = newModelHealth
+	modelHealthLock.Unlock()
 
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels

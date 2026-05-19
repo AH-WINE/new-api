@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -105,6 +106,46 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	selectGroup := param.TokenGroup
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
 
+	// ─── Model auto-fallback: if primary model's healthy ratio < threshold,
+	//      transparently route to fallback model. ─────────────────────────
+	effectiveModel := param.ModelName
+	if fallback, ok := model.GetModelFallback(param.ModelName); ok {
+		health := model.GetModelHealth(param.ModelName)
+		fallbackHealth := model.GetModelHealth(fallback.FallbackModel)
+		shouldFallback := false
+		reason := ""
+
+		if health != nil && health.TotalChannels > 0 {
+			// Rule 1: too few healthy channels — structural degradation
+			if health.HealthyRatio < fallback.ThresholdRatio {
+				shouldFallback = true
+				reason = fmt.Sprintf("健康比例 %.0f%% < 阈值 %.0f%%", health.HealthyRatio*100, fallback.ThresholdRatio*100)
+			}
+// Rule 2: relay latency P50 too high (>60s) AND fallback is faster
+		primaryLatency := model.GetModelRelayLatencyP50(param.ModelName)
+		fallbackLatency := model.GetModelRelayLatencyP50(fallback.FallbackModel)
+		if !shouldFallback && primaryLatency > 60 && fallbackLatency > 0 && fallbackLatency < primaryLatency {
+			shouldFallback = true
+			reason = fmt.Sprintf("中继延迟过高(P50=%ds > 60s)，fallback 更快(P50=%ds)", primaryLatency, fallbackLatency)
+		}
+		} else if health == nil || health.TotalChannels == 0 {
+			// No data yet — skip fallback, use primary
+		} else {
+			// No channels at all for primary model — try fallback if it has channels
+			if fallbackHealth != nil && fallbackHealth.TotalChannels > 0 {
+				shouldFallback = true
+				reason = "主模型无可用渠道"
+			}
+		}
+
+		if shouldFallback {
+			common.SetContextKey(param.Ctx, constant.ContextKeyModelFallbackFrom, param.ModelName)
+			common.SetContextKey(param.Ctx, constant.ContextKeyModelFallbackTo, fallback.FallbackModel)
+			common.SysLog(fmt.Sprintf("Model fallback: %s → %s (reason: %s)", param.ModelName, fallback.FallbackModel, reason))
+			effectiveModel = fallback.FallbackModel
+		}
+	}
+
 	if param.TokenGroup == "auto" {
 		if len(setting.GetAutoGroups()) == 0 {
 			return nil, selectGroup, errors.New("auto groups is not enabled")
@@ -134,11 +175,11 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannelExcluding(autoGroup, param.ModelName, priorityRetry, param.ExcludedChannelIds)
-			if channel == nil {
-				// Current group has no available channel for this model, try next group
-				// 当前分组没有该模型的可用渠道，尝试下一个分组
-				logger.LogDebug(param.Ctx, "No available channel in group %s for model %s at priorityRetry %d, trying next group", autoGroup, param.ModelName, priorityRetry)
+channel, _ = model.GetRandomSatisfiedChannelExcluding(autoGroup, effectiveModel, priorityRetry, param.ExcludedChannelIds)
+		if channel == nil {
+			// Current group has no available channel for this model, try next group
+			// 当前分组没有该模型的可用渠道，尝试下一个分组
+			logger.LogDebug(param.Ctx, "No available channel in group %s for model %s at priorityRetry %d, trying next group", autoGroup, effectiveModel, priorityRetry)
 				// 重置状态以尝试下一个分组
 				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i+1)
 				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupRetryIndex, 0)
@@ -172,7 +213,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannelExcluding(param.TokenGroup, param.ModelName, param.GetRetry(), param.ExcludedChannelIds)
+		channel, err = model.GetRandomSatisfiedChannelExcluding(param.TokenGroup, effectiveModel, param.GetRetry(), param.ExcludedChannelIds)
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}

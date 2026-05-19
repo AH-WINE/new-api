@@ -66,4 +66,7 @@ const (
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage ContextKey = "language"
 	ContextKeyIsStream ContextKey = "is_stream"
+	// Model auto-fallback context keys
+	ContextKeyModelFallbackFrom ContextKey = "model_fallback_from"
+	ContextKeyModelFallbackTo   ContextKey = "model_fallback_to"
 )
