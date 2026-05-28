@@ -124,7 +124,7 @@ type tokenBucket struct {
 var channelTokenBuckets sync.Map // channelId (int) → *tokenBucket
 
 func tryConsumeChannelToken(channelId int) bool {
-	const burstSize = 1.0 // max tokens per key (1 = 40 RPM)
+	const burstSize = 3.0 // max tokens per key (3 = burst 3, sustained 40 RPM)
 
 	val, _ := channelTokenBuckets.LoadOrStore(channelId, &tokenBucket{
 		tokens:     burstSize, // start full
@@ -371,10 +371,20 @@ func computeLatencyWeight(responseTime int) int {
 	return w
 }
 
-// MIN_HEALTHY_POOL_429: minimum number of enabled channels for a model-group
-// below which 429 errors will NOT trigger auto-disable. Prevents cascading pool
-// collapse when a burst of concurrent requests triggers 429s across many channels.
-const MIN_HEALTHY_POOL_429 = 20
+// GetMinHealthyPool429 returns the minimum enabled-channel threshold below which
+// 429 errors will NOT trigger auto-disable (cascading pool collapse prevention).
+// Dynamically scales with pool size: 40% of total channels, minimum 10.
+// When the pool expands (e.g. from 40 to 80 keys), this threshold grows proportionally.
+func GetMinHealthyPool429() int {
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+	total := len(channelsIDM)
+	threshold := int(float64(total) * 0.4)
+	if threshold < 10 {
+		return 10
+	}
+	return threshold
+}
 
 func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel, error) {
 	return GetRandomSatisfiedChannelExcluding(group, model, retry, nil)

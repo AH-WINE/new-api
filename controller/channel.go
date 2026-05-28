@@ -1968,3 +1968,31 @@ func OllamaVersion(c *gin.Context) {
 		},
 	})
 }
+
+func GetTokenBuckets(c *gin.Context) {
+	type resp struct {
+		TotalChannels int                            `json:"total_channels"`
+		TokenBuckets  []model.ChannelTokenBucketInfo `json:"token_buckets"`
+		Summary       map[string]int                 `json:"summary"`
+	}
+	buckets := model.GetTokenBucketStatus()
+	summary := map[string]int{
+		"ready":    0, // tokens >= 1.0
+		"draining": 0, // 0 < tokens < 1.0
+		"empty":    0, // tokens == 0
+	}
+	for _, b := range buckets {
+		if b.Tokens >= 1.0 {
+			summary["ready"]++
+		} else if b.Tokens > 0 {
+			summary["draining"]++
+		} else {
+			summary["empty"]++
+		}
+	}
+	c.JSON(http.StatusOK, resp{
+		TotalChannels: len(buckets),
+		TokenBuckets:  buckets,
+		Summary:       summary,
+	})
+}

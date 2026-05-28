@@ -15,7 +15,6 @@ import (
 )
 
 // ─── 429 cooldown 管理 ──────────────────────────────────────
-// wine 设计的三层恢复架构第二层：
 //   429 不依赖 probe 成功来恢复，而是按时间窗口自动恢复。
 //   恢复后真实请求又 429 → backoff 递增 cooldown。
 
@@ -25,7 +24,7 @@ var (
 )
 
 // 429 cooldown backoff 阶梯（秒）
-var cooldown429Steps = []time.Duration{90 * time.Second, 150 * time.Second, 240 * time.Second}
+var cooldown429Steps = []time.Duration{15 * time.Second, 45 * time.Second, 90 * time.Second}
 
 const channel429ReasonPrefix = "429 rate-limit"
 

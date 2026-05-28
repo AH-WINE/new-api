@@ -84,6 +84,11 @@ func SetRelayRouter(router *gin.Engine) {
 		httpRouter := relayV1Router.Group("")
 		httpRouter.Use(middleware.Distribute())
 
+		// Claude Code health check - respond to HEAD /v1
+		httpRouter.HEAD("", func(c *gin.Context) {
+			c.Status(200)
+		})
+
 		// claude related routes
 		httpRouter.POST("/messages", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatClaude)

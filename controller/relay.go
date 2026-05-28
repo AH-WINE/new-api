@@ -380,9 +380,10 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		// at once causes cascading pool collapse (every remaining channel gets hammered
 		// harder → more 429s → pool dries up completely).
 		poolSize := model.CountEnabledChannels("default", c.GetString("original_model"))
-		if poolSize <= model.MIN_HEALTHY_POOL_429 {
+		minPool := model.GetMinHealthyPool429()
+		if poolSize <= minPool {
 			common.SysLog(fmt.Sprintf("通道 #%d 收到 429 但池子仅剩 %d 个通道（阈值=%d），暂不禁用，仅记录 cooldown",
-				channelError.ChannelId, poolSize, model.MIN_HEALTHY_POOL_429))
+				channelError.ChannelId, poolSize, minPool))
 			gopool.Go(func() {
 				service.Record429BanWithReason(channelError.ChannelId)
 			})
