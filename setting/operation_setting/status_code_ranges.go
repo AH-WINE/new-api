@@ -29,7 +29,6 @@ var AutomaticRetryStatusCodeRanges = []StatusCodeRange{
 }
 
 var alwaysSkipRetryStatusCodes = map[int]struct{}{
-	504: {},
 	524: {},
 }
 
