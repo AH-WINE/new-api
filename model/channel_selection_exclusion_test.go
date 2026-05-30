@@ -55,7 +55,7 @@ func TestGetRandomSatisfiedChannelExcludingSkipsExcludedChannelFromCache(t *test
 	insertSelectionTestChannels(t)
 	InitChannelCache()
 
-	channel, err := GetRandomSatisfiedChannelExcluding("default", "model-a", 0, map[int]struct{}{1: {}})
+	channel, err := GetRandomSatisfiedChannelExcluding("default", "model-a", 0, map[int]struct{}{1: {}}, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, channel)

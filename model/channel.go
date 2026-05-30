@@ -1154,6 +1154,18 @@ func (channel *Channel) SetSoftDegradeInfo(timeouts int, successes int, origWeig
 	channel.SetOtherInfo(info)
 }
 
+// GetContextCap returns the context-length cap from other_info (context_cap key).
+// Returns 0 if not set, meaning no cap — the channel can handle up to model maximum (1M).
+// A non-zero value (e.g. 262144) means the channel's upstream backend rejects
+// requests exceeding that many tokens.
+func (channel *Channel) GetContextCap() int {
+	info := channel.GetOtherInfo()
+	if capVal, ok := info["context_cap"].(float64); ok {
+		return int(capVal)
+	}
+	return 0
+}
+
 // TrySoftDegrade is called when a probe times out. It increments the timeout counter
 // and degrades the channel weight. If consecutive timeouts exceed the hard-disable
 // threshold, it returns true (caller should hard-disable). Otherwise it soft-degrades.

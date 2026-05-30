@@ -184,6 +184,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		ModelName:  relayInfo.OriginModelName,
 		Retry:      common.GetPointer(0),
 	}
+	// ─── context_cap routing: when prompt > 200K, require channels
+	//      with sufficient context capacity to avoid NV 262K instances. ───
+	if tokens := relayInfo.GetEstimatePromptTokens(); tokens > 200000 {
+		retryParam.MinContextCap = tokens + 65536 // 64K buffer for completion
+	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
@@ -549,6 +554,10 @@ func RelayTask(c *gin.Context) {
 		TokenGroup: relayInfo.TokenGroup,
 		ModelName:  relayInfo.OriginModelName,
 		Retry:      common.GetPointer(0),
+	}
+	// ─── context_cap routing ───
+	if tokens := relayInfo.GetEstimatePromptTokens(); tokens > 200000 {
+		retryParam.MinContextCap = tokens + 65536 // 64K buffer for completion
 	}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {

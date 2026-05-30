@@ -387,11 +387,15 @@ func GetMinHealthyPool429() int {
 }
 
 func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel, error) {
-	return GetRandomSatisfiedChannelExcluding(group, model, retry, nil)
+	return GetRandomSatisfiedChannelExcluding(group, model, retry, nil, 0)
 }
 
-func GetRandomSatisfiedChannelExcluding(group string, model string, retry int, excluded map[int]struct{}) (*Channel, error) {
+// GetRandomSatisfiedChannelExcluding selects a random channel matching group/model/priority,
+// excluding channels in the excluded set and those whose context_cap < minContextCap.
+// minContextCap=0 means no context-length filtering (backward-compatible).
+func GetRandomSatisfiedChannelExcluding(group string, model string, retry int, excluded map[int]struct{}, minContextCap int) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
+	// (context_cap filtering is not supported in non-cache mode)
 	if !common.MemoryCacheEnabled {
 		return GetChannelExcluding(group, model, retry, excluded)
 	}
@@ -452,9 +456,23 @@ func GetRandomSatisfiedChannelExcluding(group string, model string, retry int, e
 	var sumWeight = 0
 	var targetChannels []*Channel
 	var rateLimitedChannels []*Channel
+	var capFilteredChannels []*Channel
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
 			if channel.GetPriority() == targetPriority {
+				// ─── context_cap filtering: when minContextCap > 0, skip channels
+				//      whose upstream backend has a lower context limit. ───
+				if minContextCap > 0 {
+					cap := channel.GetContextCap()
+					if cap > 0 && cap < minContextCap {
+						capFilteredChannels = append(capFilteredChannels, channel)
+						if len(capFilteredChannels) == 1 {
+							common.SysLog(fmt.Sprintf("context_cap filter: excluding low-cap channels (cap<%d) for model=%s", minContextCap, model))
+						}
+						continue
+					}
+				}
+
 				if !hasChannelToken(channel.Id) {
 					rateLimitedChannels = append(rateLimitedChannels, channel)
 				} else {
@@ -465,6 +483,16 @@ func GetRandomSatisfiedChannelExcluding(group string, model string, retry int, e
 		} else {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
+	}
+
+	// Fallback: if all channels were filtered by context_cap, use the filtered set
+	// so the request still has a path (upstream will handle the cap).
+	if len(targetChannels) == 0 && len(rateLimitedChannels) == 0 && len(capFilteredChannels) > 0 {
+		for _, channel := range capFilteredChannels {
+			sumWeight += channel.GetWeight()
+			targetChannels = append(targetChannels, channel)
+		}
+		common.SysLog(fmt.Sprintf("context_cap fallback: all channels filtered for model=%s, falling back to cap-filtered pool (%d channels)", model, len(capFilteredChannels)))
 	}
 
 	// If all channels are rate-limited (burst > pool capacity), fall back to all channels
