@@ -49,6 +49,9 @@ func InitOptionMap() {
 	common.OptionMap["TaskEnabled"] = strconv.FormatBool(common.TaskEnabled)
 	common.OptionMap["DataExportEnabled"] = strconv.FormatBool(common.DataExportEnabled)
 	common.OptionMap["ChannelDisableThreshold"] = strconv.FormatFloat(common.ChannelDisableThreshold, 'f', -1, 64)
+	common.OptionMap["ChannelRateLimitCooldownSeconds"] = strconv.Itoa(common.ChannelRateLimitCooldownSeconds)
+	common.OptionMap["ChannelRateLimitMaxRecoveryPerRun"] = strconv.Itoa(common.ChannelRateLimitMaxRecoveryPerRun)
+	common.OptionMap["ChannelAutoEnableModels"] = common.ChannelAutoEnableModels
 	common.OptionMap["EmailDomainRestrictionEnabled"] = strconv.FormatBool(common.EmailDomainRestrictionEnabled)
 	common.OptionMap["EmailAliasRestrictionEnabled"] = strconv.FormatBool(common.EmailAliasRestrictionEnabled)
 	common.OptionMap["EmailDomainWhitelist"] = strings.Join(common.EmailDomainWhitelist, ",")
@@ -364,6 +367,12 @@ func updateOptionMap(key string, value string) (err error) {
 	//	common.ChatLink2 = value
 	case "ChannelDisableThreshold":
 		common.ChannelDisableThreshold, _ = strconv.ParseFloat(value, 64)
+	case "ChannelRateLimitCooldownSeconds":
+		common.ChannelRateLimitCooldownSeconds, _ = strconv.Atoi(value)
+	case "ChannelRateLimitMaxRecoveryPerRun":
+		common.ChannelRateLimitMaxRecoveryPerRun, _ = strconv.Atoi(value)
+	case "ChannelAutoEnableModels":
+		common.ChannelAutoEnableModels = value
 	case "QuotaPerUnit":
 		common.QuotaPerUnit, _ = strconv.ParseFloat(value, 64)
 	case "SensitiveWords":

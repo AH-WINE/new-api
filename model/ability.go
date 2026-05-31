@@ -230,8 +230,41 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 	return nil
 }
 
+func ChannelAutoEnableModelList() []string {
+	if strings.TrimSpace(common.ChannelAutoEnableModels) == "" {
+		return nil
+	}
+	models := make([]string, 0)
+	for _, modelName := range strings.Split(common.ChannelAutoEnableModels, ",") {
+		modelName = strings.TrimSpace(modelName)
+		if modelName != "" {
+			models = append(models, modelName)
+		}
+	}
+	return models
+}
+
 func UpdateAbilityStatus(channelId int, status bool) error {
-	return DB.Model(&Ability{}).Where("channel_id = ?", channelId).Select("enabled").Update("enabled", status).Error
+	if !status {
+		return DB.Model(&Ability{}).Where("channel_id = ?", channelId).Select("enabled").Update("enabled", false).Error
+	}
+	models := ChannelAutoEnableModelList()
+	if len(models) == 0 {
+		return DB.Model(&Ability{}).Where("channel_id = ?", channelId).Select("enabled").Update("enabled", true).Error
+	}
+	tx := DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if err := tx.Model(&Ability{}).Where("channel_id = ?", channelId).Select("enabled").Update("enabled", false).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Model(&Ability{}).Where("channel_id = ? AND model IN ?", channelId, models).Select("enabled").Update("enabled", true).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit().Error
 }
 
 func UpdateAbilityStatusByTag(tag string, status bool) error {

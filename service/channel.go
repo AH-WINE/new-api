@@ -7,6 +7,7 @@ import (
 	"one-api/dto"
 	"one-api/model"
 	"one-api/setting/operation_setting"
+	"strconv"
 	"strings"
 )
 
@@ -33,6 +34,117 @@ func EnableChannel(channelId int, channelName string) {
 	}
 }
 
+func IsRateLimitError(err *dto.OpenAIErrorWithStatusCode) bool {
+	if err == nil || err.LocalError {
+		return false
+	}
+	if err.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join([]string{
+		fmt.Sprint(err.StatusCode),
+		fmt.Sprint(err.Error.Code),
+		err.Error.Type,
+		err.Error.Message,
+	}, " "))
+	return isRateLimitText(haystack)
+}
+
+func isRateLimitText(text string) bool {
+	text = strings.ToLower(text)
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	for _, token := range []string{
+		"429",
+		"too many requests",
+		"rate limit",
+		"rate_limit",
+		"rate-limit",
+		"rate_limited",
+		"rate limit reached",
+		"rate_limit_exceeded",
+		"requests per min",
+		"tokens per min",
+		"please try again in",
+		"上游负载已饱和",
+	} {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func channelStatusReason(channel *model.Channel) string {
+	if channel == nil {
+		return ""
+	}
+	info := channel.GetOtherInfo()
+	if value, ok := info["status_reason"]; ok {
+		return fmt.Sprint(value)
+	}
+	return ""
+}
+
+func channelStatusTime(channel *model.Channel) int64 {
+	if channel == nil {
+		return 0
+	}
+	info := channel.GetOtherInfo()
+	value, ok := info["status_time"]
+	if !ok || value == nil {
+		return 0
+	}
+	switch v := value.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case int32:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case float32:
+		return int64(v)
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		return parsed
+	default:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(fmt.Sprint(value)), 10, 64)
+		return parsed
+	}
+}
+
+func IsRateLimitAutoDisabledChannel(channel *model.Channel) bool {
+	if channel == nil || channel.Status != common.ChannelStatusAutoDisabled {
+		return false
+	}
+	return isRateLimitText(channelStatusReason(channel))
+}
+
+func ShouldEnableRateLimitChannelWithoutProbe(channel *model.Channel, now int64) bool {
+	if !common.AutomaticEnableChannelEnabled || !IsRateLimitAutoDisabledChannel(channel) {
+		return false
+	}
+	cooldown := int64(common.ChannelRateLimitCooldownSeconds)
+	if cooldown <= 0 {
+		return true
+	}
+	statusTime := channelStatusTime(channel)
+	if statusTime <= 0 {
+		return true
+	}
+	return now-statusTime >= cooldown
+}
+
+func ShouldSkipRateLimitChannelTest(channel *model.Channel, now int64) bool {
+	if !IsRateLimitAutoDisabledChannel(channel) {
+		return false
+	}
+	return !ShouldEnableRateLimitChannelWithoutProbe(channel, now)
+}
+
 func ShouldDisableChannel(channelType int, err *dto.OpenAIErrorWithStatusCode) bool {
 	if !common.AutomaticDisableChannelEnabled {
 		return false
@@ -42,6 +154,9 @@ func ShouldDisableChannel(channelType int, err *dto.OpenAIErrorWithStatusCode) b
 	}
 	if err.LocalError {
 		return false
+	}
+	if IsRateLimitError(err) {
+		return true
 	}
 	if err.StatusCode == http.StatusUnauthorized {
 		return true

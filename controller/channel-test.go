@@ -268,8 +268,23 @@ func testAllChannels(notify bool) error {
 		disableThreshold = 10000000 // a impossible value
 	}
 	gopool.Go(func() {
+		rateLimitRecovered := 0
 		for _, channel := range channels {
 			isChannelEnabled := channel.Status == common.ChannelStatusEnabled
+			now := common.GetTimestamp()
+			if !isChannelEnabled {
+				if service.ShouldEnableRateLimitChannelWithoutProbe(channel, now) {
+					if common.ChannelRateLimitMaxRecoveryPerRun <= 0 || rateLimitRecovered < common.ChannelRateLimitMaxRecoveryPerRun {
+						service.EnableChannel(channel.Id, channel.Name)
+						rateLimitRecovered++
+					}
+					continue
+				}
+				if service.ShouldSkipRateLimitChannelTest(channel, now) {
+					common.SysLog(fmt.Sprintf("skip testing channel #%d during rate-limit cooldown", channel.Id))
+					continue
+				}
+			}
 			tik := time.Now()
 			err, openaiWithStatusErr := testChannel(channel, "")
 			tok := time.Now()
