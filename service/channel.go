@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -387,4 +388,88 @@ func EnableChannel429Cooldown(channelId int, channelName string) {
 		content := fmt.Sprintf("通道「%s」（#%d）429 cooldown 到期，已自动恢复为启用状态", channelName, channelId)
 		NotifyRootUser(formatNotifyType(channelId, common.ChannelStatusEnabled), subject, content)
 	}
+}
+
+// ─── context_cap 自适应学习 ──────────────────────────────────
+//   通道的 context_cap 非固定——NV NIM 实例可能重分配导致 cap 变化。
+//   本模块实现 自动标记（Learn）机制：
+//     - 400 错误含 "context length of N tokens" → 标记 other_info.context_cap = N
+//     - 若标记成功则更新内存缓存
+//   自动清除（Unlearn）由外部探测定时负责（周期性重测并更新 SQL）。
+
+var contextCapErrorRe = regexp.MustCompile(`context length\D*(\d+)`)
+
+// ExtractContextCapFromError 从 400 错误中提取 context cap 值。
+// 返回 0 表示该错误不是 context-length 限制错误。
+func ExtractContextCapFromError(err *types.NewAPIError) int {
+	if err == nil || err.StatusCode != 400 {
+		return 0
+	}
+	matches := contextCapErrorRe.FindStringSubmatch(err.Error())
+	if len(matches) < 2 {
+		return 0
+	}
+	cap, parseErr := strconv.Atoi(matches[1])
+	if parseErr != nil || cap <= 0 {
+		return 0
+	}
+	return cap
+}
+
+// AutoMarkContextCap 自动学习并标记通道的 context_cap。
+// 仅当新 cap 值与当前不同时更新。仅向下标记（发现更小 cap），上修由探测负责。
+func AutoMarkContextCap(channelId int, capValue int) {
+	if !common.MemoryCacheEnabled {
+		return
+	}
+	channel, err := model.CacheGetChannel(channelId)
+	if err != nil || channel == nil {
+		return
+	}
+	oldCap := channel.GetContextCap()
+	if oldCap == capValue {
+		return
+	}
+	// 只允许收紧（发现更小 cap）；放宽由外部探测定时负责
+	if oldCap > 0 && capValue > oldCap {
+		return
+	}
+	info := channel.GetOtherInfo()
+	info["context_cap"] = float64(capValue)
+	channel.SetOtherInfo(info)
+	if saveErr := channel.SaveWithoutKey(); saveErr != nil {
+		common.SysLog(fmt.Sprintf("context_cap 自动标记失败: channel_id=%d, cap=%d, error=%v", channelId, capValue, saveErr))
+		return
+	}
+	model.CacheUpdateChannel(channel)
+	common.SysLog(fmt.Sprintf("context_cap 自动学习: 通道 #%d 标记为 %d（原=%d）", channelId, capValue, oldCap))
+}
+
+// AutoClearContextCapIfSucceeded 在请求成功且 prompt 超过标记的 cap 时清除标记。
+// 表示 NV 端 cap 已放宽（如从 262K 升级到 1M）。
+func AutoClearContextCapIfSucceeded(channelId int, promptTokens int) {
+	if !common.MemoryCacheEnabled || promptTokens <= 0 {
+		return
+	}
+	channel, err := model.CacheGetChannel(channelId)
+	if err != nil || channel == nil {
+		return
+	}
+	oldCap := channel.GetContextCap()
+	if oldCap <= 0 {
+		return
+	}
+	// 请求的 prompt 必须超过标记 cap 10K+ 才算真正的放宽
+	if promptTokens <= oldCap+10000 {
+		return
+	}
+	info := channel.GetOtherInfo()
+	delete(info, "context_cap")
+	channel.SetOtherInfo(info)
+	if saveErr := channel.SaveWithoutKey(); saveErr != nil {
+		common.SysLog(fmt.Sprintf("context_cap 自动清除失败: channel_id=%d, error=%v", channelId, saveErr))
+		return
+	}
+	model.CacheUpdateChannel(channel)
+	common.SysLog(fmt.Sprintf("context_cap 自动清除: 通道 #%d 原标记=%d，实际通过 %d tokens — 标记已移除", channelId, oldCap, promptTokens))
 }

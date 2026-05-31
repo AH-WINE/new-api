@@ -230,6 +230,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			// Record relay latency for model auto-fallback
 			relayDurationSec := int(time.Since(relayInfo.StartTime).Seconds())
 			model.RecordModelRelayLatency(relayInfo.OriginModelName, relayDurationSec)
+			// ── context_cap 自适应清除：请求成功且 prompt 超过标记 cap 则清除标记 ──
+			if promptTokens := relayInfo.GetEstimatePromptTokens(); promptTokens > 0 {
+				gopool.Go(func() {
+					service.AutoClearContextCapIfSucceeded(channel.Id, promptTokens)
+				})
+			}
 			return
 		}
 
@@ -372,6 +378,12 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, err.Error()))
+	// ── context_cap 自适应学习：从 400 错误中自动标记通道的 context cap ──
+	if capValue := service.ExtractContextCapFromError(err); capValue > 0 {
+		gopool.Go(func() {
+			service.AutoMarkContextCap(channelError.ChannelId, capValue)
+		})
+	}
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
 	if channelError.AutoBan && service.ShouldHardDisableChannel(err) {

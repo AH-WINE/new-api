@@ -630,12 +630,21 @@ func (m *Message) ParseContent() []MediaContent {
 				}
 			}
 		case ContentTypeVideoUrl:
-			if videoUrl, ok := contentItem["video_url"].(string); ok {
+			videoUrl := contentItem["video_url"]
+			temp := &MessageVideoUrl{}
+			switch v := videoUrl.(type) {
+			case string:
+				temp.Url = v
+			case map[string]interface{}:
+				url, ok1 := v["url"].(string)
+				if ok1 {
+					temp.Url = url
+				}
+			}
+			if temp.Url != "" {
 				contentList = append(contentList, MediaContent{
-					Type: ContentTypeVideoUrl,
-					VideoUrl: &MessageVideoUrl{
-						Url: videoUrl,
-					},
+					Type:     ContentTypeVideoUrl,
+					VideoUrl: temp,
 				})
 			}
 		}
