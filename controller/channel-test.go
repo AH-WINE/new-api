@@ -647,7 +647,18 @@ func validateTestResponseBody(respBody []byte, isStream bool) error {
 }
 
 func shouldUseStreamForAutomaticChannelTest(channel *model.Channel) bool {
-	return channel != nil && channel.Type == constant.ChannelTypeCodex
+	if channel == nil {
+		return false
+	}
+	switch channel.Type {
+	case constant.ChannelTypeOpenAI,
+		constant.ChannelTypeOpenAIMax,
+		constant.ChannelTypeCustom,
+		constant.ChannelTypeCodex:
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldSkipAutomaticChannelTest(channel *model.Channel) bool {
